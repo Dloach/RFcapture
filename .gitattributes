@@ -1,0 +1,4 @@
+# Edited on both macOS and Windows (docs/DEV-STATE.md section 10).  Keep one
+# canonical ending so neither machine rewrites every file on checkout, and so
+# tools/*.sh stays runnable after a Windows clone.
+* text=auto eol=lf

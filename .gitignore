@@ -1,0 +1,18 @@
+.pio/
+.vscode/
+.idea/
+*.exe
+*.bin
+*.elf
+node_modules/
+tests/host/*.exe
+tests/host/test_decoder
+*.pdb
+*.obj
+*.ilk
+
+# Boot dumps of every stored pulse train (RF_DIAG=1 prints these).  They contain
+# the real codes of whatever remote is in NVS, so they stay on the machine that
+# captured them - docs/README.md 2.2 explains how to regenerate one.
+docs/signals-*.log
+*.local.log
