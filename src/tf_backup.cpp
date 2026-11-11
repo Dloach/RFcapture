@@ -1,5 +1,7 @@
 #include "tf_backup.h"
 
+#include "sd_mount.h"
+
 #include <SD.h>
 #include <SPI.h>
 
@@ -20,15 +22,15 @@ constexpr const char* kHeader = "CardputerSig 1";
 // CC1101 keeps the SPI bus to itself while it is receiving.
 bool mount()
 {
+    // One shared implementation: asks the board for its SD pins, retries at
+    // decreasing clock speeds and logs every attempt.
     if (SD.cardType() != CARD_NONE) return true;
     const uint32_t t0 = millis();
-    const bool ok     = SD.begin(kSdCsPin, SPI, kSdHz);
-    Serial.printf("[tfm] begin=%d dt=%lums\n", ok, static_cast<unsigned long>(millis() - t0));
-    if (ok) return true;
-    SD.end();
-    return false;
+    const bool ok     = sdmount::ensure();
+    Serial.printf("[tfm] ensure=%d dt=%lums\n", static_cast<int>(ok),
+                  static_cast<unsigned long>(millis() - t0));
+    return ok;
 }
-
 void unmount()
 {
     SD.end();

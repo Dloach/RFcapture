@@ -25,6 +25,11 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 > **本轮改动全部只编译验证过，没有上机测过。**
 > 详见 **§8.5** / **§8.6** / **§2**。
 
+> **2026-11-09 更晚（入库 + 立项，没有改任何出货代码）**：仓库脱敏后推到 public（**§11**）；
+> 决定把固件改造成多功能系统，架构定为「单体 + 运行时 app 注册表」，第一个功能选 NFC，
+> 依赖验证 spike 已编译通过（**§12**，`pio run -e nfc-spike`）。
+> **§12 是本文件里唯一 forward-looking 的一节，其余都是已发生的事实。**
+
 ---
 
 ## 1. 当前固件：功能完整，已上机验证
@@ -426,6 +431,8 @@ TF 与 CC1101 共用 SPI（SCK 40 / MOSI 14 / MISO 39，SD CS 12，CC1101 CS 5�
    2. **把 NVS 里现存 4 条记录全部重采**（都是修 `onEdge()` 之前采的，见 §8.3），重采后确认：
       `q` 分是否都上到 90+、码值是否还是右移一位（`891A2B` 而不是 `123456`）。
    3. 如果 2 里码值仍右移，再回头查 §9.2 的采集窗口跨帧问题。
+   4. 上面 1、2 都过了，再开始 **§12 的多功能改造**——那是在这个基座上做大重构，
+      基座没验过就动手等于把两个未知叠在一起（见 §12.5 的风险要点）。
 
 ---
 
@@ -455,6 +462,17 @@ TF 与 CC1101 共用 SPI（SCK 40 / MOSI 14 / MISO 39，SD CS 12，CC1101 CS 5�
 | 315 铁门 | `123456`（右移一位后的形态 `891A2B`） |
 | 433 卷帘 上升/停止/下降 | `234567` / `23456D` / `23456F` |
 | 2026-11-08 新采的三条 | `345678` / `345674` / `345671` |
+| NFC 蓝色方块门禁卡（MIFARE Classic 1K） | `3CDEAD01` |
+| NFC 手机卡模拟态读到的随机 UID | `2BEEF001` |
+
+NFC 这两个占位符**故意保留首字节**（`0x3C` / `0x2B`）：§12.4 的推理用的就是「首字节既不是 NXP 的
+`0x04`、也不是表示随机 UID 的 `0x08`」这个性质，换成 `123456` 那种就把论据一起换掉了。
+
+另外，**2026-11-10 之后源码里不再出现任何真实 NFC UID**。`src/nfc_emu.cpp` 开机从板子自己的
+`/nfc/capture.log` 里读记录，UID 只存在于设备 SPIFFS 和这份未入库的日志里。这是刻意的：
+仓库是 public，而 `capture.log` 里是真实门禁凭据——和 `docs/signals-*.log` 不入库是同一条理由。
+**同理，`nfc-emu` / `nfc-spike` 的串口输出（含 `[emu] rec[n] uid=...` 和整份 log 回灌）等同于
+RF 脉宽 dump，别贴到公开 issue / 论坛 / pastebin 上。**
 
 三点要注意：
 
@@ -465,3 +483,643 @@ TF 与 CC1101 共用 SPI（SCK 40 / MOSI 14 / MISO 39，SD CS 12，CC1101 CS 5�
    名字本身不构成额外泄露，留着叙述才读得通。
 3. `RF_DIAG=1`（默认）开机就会把 NVS 里所有脉宽 dump 到串口。任何人拿到板子接串口就能读出来——
    这是设计如此（排障必需），但意味着**别把这个 dump 贴到公开 issue / 论坛 / pastebin 上**。
+
+---
+
+## 12. 多功能系统改造（2026-11-09 立项）
+
+目标：把固件从「RF capture 专用机」改成多功能系统，RF capture 只是其中一个 app。
+计划加的功能：键盘模拟（USB 有线 + BLE）、NFC、WiFi sniffer、SSH 工具。
+
+**架构已定：单体固件 + 运行时 app 注册表**，不走 launcher / 多分区镜像。
+理由在下面 §12.2 —— 瓶颈是 RAM 和 NVS，不是 flash，所以多分区换不来隔离收益，
+却要每个镜像各背一份 ~600 KB 的 M5GFX + Arduino core。
+
+**第一个功能是 NFC**（理由见 §12.3），依赖已经验证通过（§12.4）。
+
+### 12.1 分区表：三块白送的空间（查证于 core 2.0.17 的 `default_8MB.csv`）
+
+`platformio.ini` 用的是 `board_build.partitions = default_8MB.csv`，实际布局：
+
+| 分区 | 偏移 | 大小 | 现状 |
+|---|---|---|---|
+| `nvs` | 0x9000 | **20 KB** | `rfcap` 5.4 KB + `rfsave` 2.8 KB ≈ 已占 40%+，**不可再生** |
+| `otadata` | 0xE000 | 8 KB | 在，说明 OTA 机制已就位 |
+| `app0` | 0x10000 | 3,342,336 B (3.19 MB) | 用了 635,945 B = 19% |
+| `app1` | 0x340000 | **3.19 MB** | **完全空着** |
+| `spiffs` | 0x670000 | **1.5 MB** | 没挂载，完全空着 |
+| `coredump` | 0x7F0000 | 64 KB | 空 |
+
+三个结论，按重要性排：
+
+1. **NVS 只有 20 KB，这是全盘最紧的资源，而且长不大**（改分区表 = 毁掉采集数据，违反 §5 硬约束）。
+   所以新功能的一切持久化状态（WiFi 凭据、SSH host key、按键宏、BLE 配对、NFC 采集记录）
+   **都不许进 NVS**，放 `spiffs` 那 1.5 MB 或 SD 卡。
+2. **flash 完全不是瓶颈**：五个功能全上估 ~1.65 MB，app0 装得下还剩 1.5 MB。
+3. **`app1` 建议不做 launcher，做已知可用的 recovery 黄金镜像**——采集数据不可再生、
+   烧录又要按 G0 进下载模式，有个能 OTA 回去的兜底很值。OTA 写 app1 不碰 NVS，安全。
+
+堆（实测，见 §7）：**264 KB free，SD 挂载时最低 232 KB**。而 WiFi 驱动 ~50 KB、
+Bluedroid BLE ~60 KB、libssh + mbedTLS 握手峰值 ~80 KB、NFC ~20 KB——**同时开必爆**。
+运行时互斥是硬要求，不是设计选择。
+
+### 12.2 五个功能的可行性
+
+| 功能 | 结论 | 关键依据 |
+|---|---|---|
+| **USB 有线键盘** | 硬件可以，**当前编译配置关掉了** | 见下面「USB 那一坑」 |
+| **BLE 键盘** | 可行，最贵之一（~60 KB 堆 / ~350 KB flash） | core 2.0.17 自带 `BLEHIDDevice.h`；S3 只有 BLE 没有经典蓝牙 |
+| **NFC** | **可行，硬件已在手** | 见 §12.4，全部查证过 |
+| **WiFi sniffer** | 可行，代价是 RF 采集必须停 | `esp_wifi_set_promiscuous()` 在 IDF 4.4 的 `esp_wifi.h` 里就有；无 PSRAM → 忙信道必丢包 |
+| **SSH** | 技术可行，法律上要慎重 | 见下面「SSH」 |
+
+**USB 那一坑（已查证，别踩）**：`boards/cardputer_adv.json` 里 `hwids` 是 `0x303A`——乐鑫自己的 VID，
+所以 USB-C 接的确实是 S3 **原生 USB**，不是 UART 桥，硬件上能做 HID。
+但 `extra_flags` 里是 `-DARDUINO_USB_MODE=1`，而 core 的 `boards.txt:144` 写着这个值等于
+**「Hardware CDC and JTAG」**；`USBHIDKeyboard` 整个类被 `#if CONFIG_TINYUSB_HID_ENABLED` 包着
+（`libraries/USB/src/USBHID.h:20`），要的是 **USB-OTG / TinyUSB，即 `ARDUINO_USB_MODE=0`**。
+S3 只有**一个 USB PHY**（`hal/usb_phy_types.h`：`USB_PHY_CTRL_OTG` vs `USB_PHY_CTRL_SERIAL_JTAG`，二选一）。
+
+好消息：预编译库的 `tools/sdk/esp32s3/sdkconfig` 里 `CONFIG_TINYUSB_ENABLED=y`、HID/CDC/MSC/MIDI/DFU/VENDOR 全开，
+**不用重编 IDF**。坏消息：切到 mode 0 会同时改掉串口控制台和**烧录方式**
+（变成 1200-bps-touch 复位，不再是 `--before usb_reset`），正好撞上 §10 第 4 条那个 G0 下载模式的坑。
+**这一步必须硬件在手才敢动，动之前先确认能刷回来。**
+
+**SSH**：[ewpa/LibSSH-ESP32](https://github.com/ewpa/LibSSH-ESP32) 明确写了在 **core 2.0.17 + ESP32-S3** 上测过，
+client / server / SCP 都有，还给了 RAM 调参宏——技术上唯一能直接用的。
+但 libssh 是 **LGPL-2.1**，而本仓库 public 且**没有 LICENSE**，引进来就有传染性义务。
+代价 ~300–500 KB flash、握手峰值 ~60–100 KB RAM。
+**如果只是想连局域网设备敲几条命令，telnet 客户端 ~10 KB、纯 lwIP socket、core 2.x 一定能编。**
+
+**射频互斥（这条决定架构）**：CC1101 的 OOK 接收是 GDO0 → GPIO CHANGE 中断 + `micros()` 拿 1 µs 分辨率，
+WiFi/BLE 的 coex 任务和中断会带来几十 µs 到 ms 级 ISR 延迟抖动，**开着就一定丢边沿**，
+§8.3 那个「底噪重、`isr≈2000/s`」会被放大一个量级。
+所以进 RF 采集前必须 `WiFi.mode(WIFI_OFF)` + `BLEDevice::deinit(true)`，退出再恢复。
+Bruce / Marauder 那一类固件也都是模式切换，没有谁真并发。
+**RMT 不冲突**：WiFi/BLE 都不占 RMT，`ook_tx` 的 legacy RMT channel 0 是安全的。
+
+### 12.3 参考固件：能拿的和不能拿的
+
+| 项目 | License | 判定 |
+|---|---|---|
+| **Bruce** (pr3y) | **AGPL-3.0** | **不能** —— 双重否决：AGPL + `platformio.ini` 要求 pioarduino / core 3.x，正是 §5 锁死不能升的那个 |
+| **Evil-M5Project** | **MIT** | **最佳架构参考** —— 明确支持 Cardputer ADV，README 推荐 core **2.1.4 及以下**，和本项目的 6.13.0 最接近 |
+| **M5Unit-NFC** | **MIT** | **直接可用**，官方就有 Cap CC1101 + Cardputer ADV 的 env（§12.4） |
+| **ESP32 Marauder** | **MIT** | sniffer 逻辑可摘（挑代码，别整体 build） |
+| **M5Launcher** (bmorcelli) | MIT | 走多分区路线时再参考 |
+| **LibSSH-ESP32** (ewpa) | **LGPL-2.1** | 技术可用，法律上先决定本仓库 license |
+| T-vK/ESP32-BLE-Keyboard | **无 LICENSE 文件** | **别拷**——等于 all rights reserved。用 core 自带的 `BLEHIDDevice` |
+
+### 12.4 Stage 0 已通过：NFC 依赖能共存
+
+`pio run -e nfc-spike` **编译通过**。这是动手前唯一真正的未知项，现在消掉了。查证链条：
+
+| 查证项 | 结果 |
+|---|---|
+| 工具链 | M5Unit-NFC 官方的 `CapCC1101_*_CardputerADV_*` env 用 `[arduino_latest] = espressif32 @ 6.12.0`，和本项目锁的 `6.13.0` **同一条平台线**（都是 core 2.x / IDF 4.4） |
+| 解析出的版本 | `M5Unit-NFC@0.1.2` → `M5UnitUnified@0.6.4` → `M5HAL@0.1.4` → `M5Utility@0.3.1`，与 `M5Cardputer@1.1.1`（带 `M5GFX@0.3.0` / `M5Unified@0.3.0`）**无冲突** |
+| CS 引脚 | `CapST25R3916` 的默认地址是 `0x06 /* SPI CS pin */`，**正好等于 `RF_NFC_CS = 6`** |
+| SPI 总线抢占 | `wiring::addSPI()` 里是 `if (!SPI.bus()) SPI.begin(...)`——**总线已被 `cc1101.cpp:159` 开过就直接复用**，不会用它的引脚表覆盖 G40/G39/G14 |
+| 万一 CC1101 没识别到 | `spiPins()` 取 `M5.getPin(sd_spi_sclk/miso/mosi)`，即板子的 SD/SPI 共享总线，所以走 `NO RADIO` 降级路径时 NFC 仍能拿到正确引脚 |
+| SPI mode 冲突 | CC1101 是 mode 0，ST25R3916 是 **mode 1 @ 10 MHz**。两边各自在 `beginTransaction(SPISettings)` 里，不冲突 |
+| CS 管理 | `spics_io_num = GPIO_NUM_NC`，每个 unit 自己拉 CS——和现在 CC1101(G5) + SD(G12) 的用法一致 |
+| 能力范围 | NFC-A/B/F/V，Detect / Dump / ReadWrite / ValueBlock / NDEF / **Emulation** / PolicyOverride，MIFARE Classic 带 crypto1 读写 |
+| 尺寸 | spike 单独编 = 619,225 B / 23,440 B（含整套 M5GFX）。按符号名归类，detect+identify 这条路径只占 **~45 KB** NFC/ST25R3916 代码，比外部估的 60–150 KB 小 |
+
+**能力边界（原来那句「MIFARE Classic 不支持」说得太粗，逐条查证后重写）**：
+
+| 能力 | 支持 | 证据 |
+|---|---|---|
+| 读 UID / ATQA / SAK / 类型 / 容量 | ✅ **已上机验证** | 本节末尾那条真实记录 |
+| MIFARE Classic 整卡 dump | ✅ **API 有** | `nfc_layer_a.hpp:329` `dump(mkey)`；`mifare.hpp:53` `DEFAULT_KEY{0xFF×6}` 就是标准出厂传输密钥 |
+| MIFARE Classic 带 crypto1 读写 / value block / 访问位 | ✅ API 有 | `mifareClassicAuthenticateA/B`、`ReadAccessCondition`、`{Read,Write,Increment,Decrement,Transfer}ValueBlock` |
+| 未知密钥的破解（nested / darkside） | ❌ **完全没有** | 全库 grep `nested\|darkside\|crack\|recoverKey` 只命中一条无关的 NDEF `apply_nested_message` |
+| NFC-A 模拟，**任意 4 或 7 字节 UID** | ✅ **可以** | `emulation_layer_a_ST25R3916.cpp:151` `memcpy(wbuf, picc.uid, picc.size)`，`:163` 按 UID 长度切 `REG_AUXILIARY_DEFINITION`；`:142` 明确 **10 字节 UID 不支持** |
+| MIFARE Classic 的**完整**模拟（应答 crypto1 认证） | ❌ **没有** | 模拟侧全文件 grep `crypto1\|crypt\|auth` **零命中**；`EmulationLayerA::begin(picc, ptr, size)` 是内存级模拟，给的是明文缓冲区 |
+
+**所以「NFC capture」到底能做到什么，取决于门禁读卡器怎么认证**：
+
+- **只认 UID 的门禁**（很多老系统就是这样）→ **能复制能回放**。读一次 UID，再用 NFC-A 模拟发同一个 UID 就行，这条路是通的。
+- **要做 crypto1 认证的门禁** → **不能**。既能 dump（如果密钥是默认的 FF×6 或已知），但**模拟侧答不出认证**，所以回放不了。
+- **密钥被改过、又不知道密钥** → **连 dump 都不行**，而且库里没有破解能力，这一条是硬边界。
+
+UI 上按这三档给提示，别笼统写「支持 MIFARE Classic」。
+
+spike 代码在 `src/nfc_spike.cpp`，整份被 `#ifdef RF_NFC_SPIKE` 包着。
+**三个出货 env 都不定义这个宏，所以它编译成空 TU，产物字节不变**——已验证：
+加了这个文件之后 `cardputer-adv` 仍是 **635,945 B / 26,264 B**，和加之前一模一样。
+它同时也是将来上机测 NFC 的载体，别删。
+
+**2026-11-09 上机确认（不只是编译）**：spike 刷进真板子后串口报
+`[spike] ready=1 heap=356180 min=350296`——`addSPI()` 和 `units.begin()` 都返回真，
+即 ST25R3916 **在 CS=G6 / SPI mode 1 / 10 MHz 上真的应答了**，上表里那些「查过源码所以应该没问题」
+的推断有了一条硬证据。堆数字也值得记：356 KB free / 350 KB min，比出货固件的 264/232（§10）
+高出一大截，因为 spike 没挂 SD、没初始化 CC1101 和 RMT。**别把 356 KB 当成 NFC app 可用预算**，
+真 app 要和现有那套共存，预算按 232 KB min 那条线算。
+
+心跳行是故意加的：ESP32-S3 的 USB-CDC 口每次复位都会重枚举，`setup()` 里那句一次性报告
+基本抓不到，所以 `loop()` 每 2 秒重播一次状态。
+
+顺带记一条踩坑：**在 G0 下载模式下用 pyserial 手动拉 DTR/RTS 复位会把它再次送进下载模式**
+（`boot:0x23 DOWNLOAD`），因为 DTR 映射到 IO0。要么用 esptool 的
+`--before default_reset --after watchdog_reset run`，要么像 spike 这样让固件自己周期性报告状态、
+抓串口时完全不碰信号线（`p.dtr = False; p.rts = False` 再 `open()`）。
+
+**无卡健康探测（同样已上机）**：连续 4 分钟、119 次心跳里 `detect()` 一次都没命中，
+`loops` 每秒只涨 1——正好等于 `detect(vector)` 的 1000 ms 默认超时，说明轮询在跑、
+每秒约 1000 次 REQA 发出去但没有任何东西应答。「场上没卡」和「场没起来」在这个现象下
+完全无法区分，所以 spike 加了寄存器转储，结果：
+
+```
+[spike] regs ok=1 opctl=CB(en=1 tx_en=1) mode=09(targ=0) txdrv=D0
+```
+
+| 寄存器 | 值 | 判读 |
+|---|---|---|
+| `REG_OPERATION_CONTROL` | `0xCB` | `en`=1 振荡器+稳压器已起；`rx_en`=1 接收开着；**`tx_en`=1 场是开的**；`wu`=0 不在唤醒模式；低两位=0b11 外部场检测器自动（对应 `unit_ST25R3916.cpp:250`） |
+| `REG_MODE_DEFINITION` | `0x09` | `om`=0x08 **就是 ISO14443A**（见 `ST25R3916_definition.hpp:31` 的 `ISO14443A = 0x01 << 3`，别按数据手册印象猜成 0b000）；`targ`=0 是 initiator/poller 不是模拟；`nfc_ar`=0b01 自动恢复 |
+| `REG_TX_DRIVER` | `0xD0` | 天线驱动等级非 0 |
+
+**结论：无卡能查的项目全部通过，NFC 通路已验证到天线为止。**
+
+**2026-11-10 整条链路读通了**（用手机贴着试的，手机在卡模拟态下会应答 REQA）：
+
+```
+[ 32577][V][nfc_layer_a.cpp:238] detect(): ATQA:0004
+[ 32580][V][nfc_layer_a.cpp:246] detect(): Detect:ATQA:0004 SAK:08 2BEEF001 (MIFARE Classic 1K)
+[ 32813][V][nfc_layer_a.cpp:298] activate(): ACTIVATED 2BEEF001 0
+[ 32819][D][unit_ST25R3916_nfca.cpp:230] nfcaReceive(): Timeout
+[ 32820][D][nfc_layer_a.cpp:2010] nfca_request_ats(): Failed to RATS 0
+[spike] uid=2BEEF001 type=MIFARE Classic 1K atqa=0004 sak=08 user=752 total=1024
+[spike] ready=1 loops=93 hits=1 heap=347788 min=342496
+```
+
+`detect → 防冲突 → select → activate → identify` 全部走通，`hits=1`。四点值得记：
+
+1. **`Failed to RATS` 不是故障。** RATS 是 ISO14443-4（ISO-DEP）的东西，MIFARE Classic 本来就不支持，
+   `identify()` 试一下、超时、回退，属于正常路径。将来在 app 里别把它当错误报给用户。
+2. **`2BEEF001` 是随机 UID。** 真 MIFARE Classic 的 4 字节 UID 首字节一般是 `0x04`（NXP 厂商码），
+   这里是 `0x2B`——手机在卡模拟态会给随机轮换 UID（Android 的隐私保护）。
+   **所以这条记录只证明链路通，不能用来验证 UID 读取的稳定性**，那一步必须用实体卡。
+3. **一次 detect+identify 吃掉约 8 KB 堆**：命中前 355,924，命中后 347,788，min 342,496。
+   加上 §12.4 开头那条「真 app 要和现有 RF 那套共存，预算按 232 KB min 算」，这个量级完全放得下。
+4. **手机只在亮屏解锁时才应答 REQA**，息屏后 NFC 控制器不响应。
+   这也解释了为什么第一轮 4 分钟 119 次心跳零命中——不是硬件问题，是当时场上确实没有可应答的东西。
+   拿手机当测试靶子可以，但别指望它随时可用。
+
+**离机采集已验证（spike 现在会自动落盘）**：上机时发现一个反复咬人的问题——
+检测记录只存在于串口那一瞬间，抓取窗口没开着就永久丢失，重启也全丢，
+前后踩了两次。所以 spike 加了自动写文件，并且**已经端到端验过**：
+板子拔掉 USB 靠电池跑了 4.2 分钟，回来插上后日志完好、自动回灌成功。
+
+| 设计点 | 取值 | 理由 |
+|---|---|---|
+| 存储目标 | SD 优先，SPIFFS 兜底 | 有 SD 就能拔卡在电脑上看；没卡也照样存。**绝不写 NVS**（§12.1：20 KB 不可扩，里面是 4 条不可再生的 RF 记录） |
+| 写入方式 | 每条记录 open/append/close | 慢，但台架工具随时会被拔电池，长期持有句柄会丢掉最后一次 flush 之后的全部数据 |
+| 记录范围 | 成功（`H`）和 identify 失败（`F`）都写 | 「全部采集信息」包含失败的——答了 REQA 和防冲突却分类失败的才是最有意思的那种，只记成功等于把它藏起来 |
+| 去重 | **不去重** | 卡贴在场里每秒产生一条，那是真实发生的事；`gap` 字段记了间隔，离线合并即可 |
+| 读回方式 | 开机 5 s 后自动整份回灌串口，之后每 60 s 一次，超 64 KB 只回灌尾部 | **不接键盘**：`src/app.cpp:83` 那个自定义 `PollingKeyboardReader` 背后是 §4 还没定案的按键卡死，spike 不该继承那个坑。开机即回灌也不行——板子一插上就启动，那时宿主还没打开 CDC 口 |
+| `uidLen` 字段 | 必记 | NFC-A 模拟只接受 4 或 7 字节 UID（`emulation_layer_a_ST25R3916.cpp:142`），**这个字段直接决定读到的卡能不能回放** |
+
+代价：文件系统代码让 flash 从 640,049 涨到 **702,625 B（+62 KB）**，
+SPIFFS 挂载把堆 min 从 342,496 拉到 **318,244（约 -24 KB）**。Stage 2 做真 app 时这两笔都要计入预算。
+
+真实日志（跨两次刷写累积，证明 SPIFFS 扛过了重刷）：
+
+```
+# session ms=10213 nfcReady=1 regs=1 opctl=CB mode=09 txdrv=D0 free=351032
+# session ms=1600  nfcReady=1 regs=1 opctl=CB mode=09 txdrv=D0 free=351032
+H ms=248683 uid=3CDEAD01 type=MIFARE Classic 1K atqa=0004 sak=08 uidLen=4 user=752 total=1024 gap=0    heap=350756
+F ms=251734 uid=3CDEAD01                            atqa=0004 sak=08 uidLen=4
+H ms=253766 uid=3CDEAD01 type=MIFARE Classic 1K atqa=0004 sak=08 uidLen=4 user=752 total=1024 gap=5083 heap=342616
+```
+
+从这三条得到两个 Stage 2 必须处理的事实：
+
+1. **`identify()` 不是每次都能过**——同一张卡、同样的 atqa/sak，三次读取里失败了 1 次（那条 `F`）。
+   所以 app 里不能把 identify 当必然成功，UI 要能重试，不能一次失败就报「未知卡」。
+2. **`uidLen=4` 落在模拟支持的范围内**，即这张卡在「只认 UID 的门禁」那一档下是可回放的。
+   但 UID 首字节 `0x3C` 既不是 NXP 的 `0x04`、也不是 ISO14443-3 表示随机 UID 的 `0x08`，
+   而且这三次是在场里连续读的（间隔 5 s），手机在同一个场里也可能保持同一个随机 UID 不变——
+   **所以「UID 跨次稳定」这一条仍未证实**，需要把卡拿走、隔几秒再贴一次看是否还是 `3CDEAD01`。
+   §12.4 前面那句「UID 稳定性必须用实体卡验」因此还没有销账。
+
+两条踩坑记在这里，将来别再走一遍：
+
+1. **别用裸 `nfcA.request()` 当探测**。它把卡留在 READY 态，而 REQA 只有 IDLE 态的卡会应答，
+   于是探测本身会毒化紧随其后的 `detect()`，制造假阴性。要区分「场死了」和「防冲突失败」，
+   用 `-DM5_LOG_LEVEL=5` 编译即可——`NFCLayerA::detect()` 本来就在 verbose 级打 ATQA。
+   这个开关不会刷屏：`unit_ST25R3916.hpp` 里 verbose 日志是 **0 条**，热的 SPI/transceive 路径全静音，
+   19 条都在 `nfc_layer_a.cpp`，且只在 request 成功时才触发。
+2. **我原以为 `tx_en` 会随每次操作翻转**（`unit_ST25R3916.cpp:535/541` 那对 field-on/field-off），
+   所以打算不读它。实测 `opctl` 稳定报 `tx_en=1`，翻转的是别的路径。上面那个假设是错的，
+   但读 `en`（bit7，不随操作翻转）作为主判据这一点仍然成立。
+3. **贴手机测试时，「响了」这个信号是有歧义的**——手机自己感到一个 NFC 场也会响/震动。
+   当时 spike 只在串口打一行，屏幕上没有可读的命中证据，于是「有声音、屏幕有记录」
+   既可能是板子读到了，也可能是手机的提示音加上屏幕那句静态的 `TAP A CARD` 被误读。
+   现在 spike 屏幕上常驻 `polls=/hits=` 计数、命中后显示绿色 UID 块并把底行改成 `GOT n CARDS`，
+   提示音也从 10 ms 改成 **150 ms / 2500 Hz**（这个长度不可能是手机的提示音）。
+   一般教训：**上机验证的证据要落在被验证设备自己的屏幕上，不能只在宿主机串口里。**
+
+### 12.4.1 多协议轮询结果 + 回放（复制卡）的两条硬边界（2026-11-10）
+
+**多协议轮询已经跑通，蓝色圆形门禁的问题按用户决定收尾。**
+
+spike 现在每一轮把 A/B/F/V 四个协议全扫一遍。这不是库支持的用法——`M5Unit-NFC` **没有多协议示例**，
+`NFCB/NFCF/NFCV` 的 `Detect.ino` 各自在 `begin()` 之前把 `cfg.mode` 设一次就完事。ST25R3916 是
+**单协议芯片**：每条 transceive 路径开头都有 `CHECK_MODE()`，模式不对直接返回 false 并报
+`Illegal mode`。要轮询就得在协议之间调用公开的 `configureNFCMode()`（`unit_ST25R3916.hpp:112`）。
+
+**踩到的坑（记下来别再走）**：四个 `configure_nfc_x()` 最后都会调 `nfc_initial_field_on()`，
+而它在 `REG_OPERATION_CONTROL` 的 `tx_en` 已经置位时直接报 `Already tx_en` 返回 false
+（`unit_ST25R3916.cpp:361`）。`configureNFCMode()` 开头那条 `CMD_STOP_ALL_ACTIVITIES` 停的是状态机，
+**不清 `tx_en` 这个寄存器位**。后果是一轮里只有第一个协议能配置成功，后三个每次都失败，
+`detect()` 立刻返回，循环空转到 ~150 Hz，串口被 `Already tx_en` 刷屏。
+修法：切模式前先 `readOperationControl` 再 `writeOperationControl(opctl & ~(tx_en|rx_en))`，
+**但保留 `en`（bit7）**——它不属于场开关，而且 `configure_nfc_v()` 会对同一个寄存器做读改写
+（`en_fd_c1|en_fd_c0`），清了等于白清。
+
+寄存器实测证据（`om` 是 `REG_MODE_DEFINITION` 的 bit5:3，对照 `InitiatorOperationMode`）：
+
+```
+[spike] mode A=09 B=14 F=1C V=70 (expect om 08 10 18 70)
+```
+
+四个 `om` 全对得上（A=ISO14443A `0x01<<3`，B=`0x02<<3`，F=FeliCa `0x03<<3`，V=SubCarrierStream `0x0E<<3`）。
+
+代价：flash 702,625 → **731,541 B（+28.9 KB）**，堆 min 318,244 → **317,956**（基本没动）。
+出货固件 `cardputer-adv` 重编仍是 **635,945 B / 26,264 B**，与基线一致。
+
+**用户多卡实测结果**：试了 7 个物体，**全部是 `proto=A`，B/F/V 一次都没扫出来过**。
+其中 1 张是真 NTAG 215（7 字节 UID，首字节 `0x04` = NXP 厂商码，硬编码稳定，可回放），
+1 个是 MIFARE Classic 4K，其余 5 个报 `ISO14443-4`（`sak=28/20`，`user=0 total=0`）。
+5 个 `ISO14443-4` 的 UID 每次都不同——**如果它们是同一个物体**（比如卡模拟态的手机），
+这就是随机轮换 UID 的特征；但也完全可能是 5 张不同的卡，现有数据分不出来。
+
+**蓝色圆形门禁**：用户说「就先这样吧」，问题按未定案收尾。最可能的解释是
+**125 kHz EM4100 类 LF 卡**——ST25R3916 是 13.56 MHz HF，CC1101 是 sub-GHz，两个都物理上读不到，
+属于硬件边界而不是固件 bug。**但这条没有被正式证实**（没有单独确认过那个圆形门禁在 A/B/F/V 下
+都是零响应），所以留在这里当「大概率结论」，不当已销账项。
+
+---
+
+**下面是「复制信号开门」这个需求真正撞上的东西。两条边界，都在 M5Unit-NFC 0.1.2 里，
+都不是运行时能发现的——第一条会失败关闭并打一行日志，第二条静默失败。**
+
+#### 边界一：`EmulationLayerA::begin()` 只接受 NTAG2xx 和 MIFARE Ultralight
+
+`emulation_layer_a.cpp:40`：
+
+```cpp
+if (!(picc.isNTAG2() || picc.type == Type::MIFARE_Ultralight)) {
+    M5_LIB_LOGE("Not support %u %s", picc.type, picc.typeAsString().c_str());
+    return false;
+}
+```
+
+MIFARE Classic 被直接拒绝，所以蓝色方块门禁卡**不能用自己的类型名去模拟**。
+
+**但这是策略，不是物理限制。** `ListenerST25R3916ForA::load_config()`
+（`emulation_layer_a_ST25R3916.cpp:141`）往芯片里只写三样东西——UID 字节、ATQA、SAK——
+外加 `REG_AUXILIARY_DEFINITION` 里的 4/7 字节 UID 标志位。**它从头到尾没读过 `picc.type`。**
+type 只在后面三个地方被用到：`receive_callback` 的 READ / GET_VERSION / READ_SIG 分支，
+以及 `totalSize()` / `unitSize()` 的边界检查。
+
+所以：**用 Ultralight / NTAG215 当「载具类型」，再把 atqa/sak 用采集到的真值覆写回去，
+放到空气中的就是这张卡真实的射频身份。** `PICC::emulate()` 会用 `emulation_settings[]`
+（`nfca.cpp:197`）里的值填 atqa/sak——那是库认为该类型应该报什么，不是采集到什么，
+所以必须在 `emulate()` 之后覆写。这就是 `src/nfc_emu.cpp` 里 `carrierFor()` 做的事，
+屏幕上会明写 `CARRIER`，不假装类型是真的。
+
+顺带一个正向发现：`emulation_settings[2]` 正好是 `{0x0004, 0x08}`，和这张门禁卡采集到的
+atqa/sak **完全一致**。也就是说即使不覆写，Classic 1K 这一档的值也是对的——但覆写仍然要做，
+因为其余类型对不上。
+
+#### 边界二：模拟侧完全没有 crypto1
+
+`crypto1` 在整个库里只出现在三个文件：`nfc/crypto/mifare_classic_crypto1.hpp`、
+`unit/unit_ST25R3916.hpp`、`unit/unit_ST25R3916_nfca.cpp`——**全是读卡器侧**。
+对 `emulation_layer_a.cpp` 和 `emulation_layer_a_ST25R3916.cpp` grep
+`AUTH` / `0x60` / `0x61` / `crypto` / `Key`，**一个都没有**。库里也没有任何破解密钥的代码。
+
+结论：**需要认证的门禁读不了也回放不了，这个库怎么改都不行。**
+
+#### 为什么还是值得做：两种情况在板子上可区分
+
+REQA、防冲突、SELECT 都是**芯片自己应答的**——`goto_off()` / `goto_idle()` 会清掉
+`REG_NFCIP_1_PASSIVE_TARGET_DEFINITION` 的 `d_106_ac_a`，注释写的就是
+"Enable auto response for NFC-A"。所以这三步**永远不会走到 `receive_callback()`**。
+
+于是：
+
+| 门禁读卡器的行为 | `receive_callback()` 收到的命令数 |
+|---|---|
+| 只认 UID，选完就开门 | **0 条** |
+| 要认证 | `0x60` / `0x61`（AUTH key A / key B），后跟块号 |
+
+**数一数收到了什么，就是整个实验。** 未认证的那一档下 `receive_callback` 一条命令都不会有，
+所以「零命令 + 门开了」= 只认 UID；「出现 0x60」= 要认证，回放这条路直接断。
+
+库对未知命令的处理是 `default: M5_LIB_LOGE("CMD:%02X %u", ...)` 然后返回 `State::Idle`
+（`emulation_layer_a.cpp:220`）——结束会话。这是诚实的结果，不该编一个应答回去，
+否则读卡器的行为反而没法解读了。
+
+#### `nfc-emu` 构建：已烧录，验证到哪一步
+
+新增 `src/nfc_emu.cpp`（`#ifdef RF_NFC_EMULATE`）+ `[env:nfc-emu]`。和 `nfc_spike.cpp` 分开两个文件，
+理由和当初分开一样：读卡的 spike 已经验过了，不能被回放的改动碰坏。出货环境两个宏都不定义，
+两个文件对它们都是空翻译单元。
+
+```
+pio run -e nfc-emu -t upload --upload-port COM10
+```
+
+`cfg.emulation` 必须在 `Units.begin()` **之前**设好——`configureEmulationMode()` 是从 `begin()` 里调的，
+读卡模式和模拟模式是同一颗芯片的**互斥配置**，没有运行时开关。
+所以 `nfc-emu` 是模拟器、`nfc-spike` 是读卡器，**切换靠重刷**。这条 Stage 2 必须处理成显式的模式切换，
+不能做成一个 toggle。
+
+几个刻意的设计：
+
+| 设计点 | 取值 | 理由 |
+|---|---|---|
+| UID 从哪来 | 开机解析 `/nfc/capture.log`，**源码里一个真值都没有** | 仓库是 public，日志里是真实门禁凭据（见 §11） |
+| 行格式兼容 | `id=`（多协议版）和 `uid=`（A-only 版）都认 | 日志跨了两次刷写累积，两代格式都在盘上 |
+| 开机自动开始模拟 | rec[0]，不等按键 | 使用场景是单手拿着板子走到门前，「先找方向键再按回车再举起来」这套动作在读卡器前会手忙脚乱 |
+| 串口/屏幕输出时机 | 只在 `state` 回到 `None`/`Off` 时 | 库自带的示例自己写着："printing stops the emulation answering for as long as it runs"。会话中打印会把一次成功的回放变成失败，还会赖错对象 |
+| `M5_LOG_LEVEL` | **1（Error）**，不是 spike 的 5 | 模拟要在几百微秒内应答读卡器，日志越少越好。只留 Error 是为了保住 `receive_callback` 那条 `CMD:%02X`——它恰好就是本构建要找的 AUTH |
+| `-DM5_UNIT_NFC_EMULATION_TRACE=1` | 打开库自带的状态 trace | 它只写内存，并且自己从 `goto_off()` dump（注释："The field is gone, so printing costs nothing here"），零成本拿到 OFF/IDLE/READY/ACTIVE/HALT 的完整路径。128 条 × 14 B |
+| 命令 trace | 自己的 32 条 RAM 环 | 库的 trace 只记状态，不记命令字节；而命令字节才是判据 |
+| 心跳 | 每 5 s 重播全部记录 | 和 spike 的 `dumpLog()` 同一个理由：USB-CDC 每次复位都重新枚举，开机那次一次性输出抓不到就永久丢了 |
+| 界面 | 抄 `src/app.cpp` 的视觉语言，不自己发明 | 同一块 240×135 屏、同一副 60 键键盘。第二个固件长得不像产品，操作者就得重学一套「哪个键干什么」 |
+
+**已验证（2026-11-10 上机）**：
+
+```
+[emu] ready=1 recs=8 fs=SPIFFS sel=0 emulating=1 state=O cmds=0 auth=0 heap=281760 min=249420
+[emu] rec[0]* uid=<门禁卡> len=4 atqa=0004 sak=08 reads=2 type=MIFARE Classic 1K emulateAs=Ultralight CARRIER
+[emu] rec[7]  uid=<NTAG215> len=7 atqa=0044 sak=00 reads=1 type=NTAG 215 emulateAs=NTAG215
+[emu] on-air uid=<门禁卡> atqa=0004 sak=08 type=MIFARE Ultralight mem=1024
+```
+
+8 条记录全部从 SPIFFS 日志正确解析（`reads` 去重计数对得上：门禁卡 2 次，那条 `F` 被正确忽略）；
+`emulating=1 state=O` = 状态机已上膛、在 `Off` 等读卡器，是 `start_emulation()` → `goto_off()` 之后
+正确的待命态；`on-air` 那行证明**芯片里烧的是门禁卡真实的 UID/ATQA/SAK**，外面套的才是 Ultralight 载具。
+flash **695,921 B**，RAM **25,964 B（7.9%）**，最小空闲堆 **249,420 B**（全屏 sprite 吃掉 64,800 B 之后）。
+出货环境 `cardputer-adv` 重建仍是 **635,945 B / 26,264 B**，与基线逐字节一致。
+
+#### 界面重做（2026-11-10，用户否决了第一版）
+
+第一版是**一页塞完**：文字全 size 1，列表 + 详情块 + 状态行 + 提示行竖着摞，直接 `lcd.printf` 到面板，
+键位只在一行 40 字符里写了三个。用户的原话是
+「UI 太差了吧，根本不知道干怎么操作，这个设备有 60 个按键，你不给提示根本不知道从何入手，
+页面内容也是随便一堆放一起，眼睛看花了也没弄懂」。三条都成立，重做如下：
+
+| 改了什么 | 怎么改 |
+|---|---|
+| 一页塞完 | 拆成**三页**：`REPLAY`（当前在放什么、读卡器干了什么）／`CARDS`（选卡）／`KEYS`（键位表）。每页只回答一个问题 |
+| 没有键位提示 | **每页页脚常驻**绿键帽 + 灰描述（`ENT re-arm` / `L cards` / `esc stop` / `H keys`），且 `H` 在任意页都能进 `KEYS` 页，`KEYS` 页列全部 6 个键位 |
+| 状态读不懂 | 库的 `- O I R A H` 技术上正确、在门口毫无用处。换成 size 2 的**填色横幅**写整句：`WAITING FOR READER` / `READER HAS THE UID` / `READER SAID HALT` |
+| 结论要自己推 | 加一条**彩色判定带**，直接把两个计数器翻译成人话：绿 `TOOK THE UID, ASKED NO KEY` / 红 `NEEDS A KEY - CANNOT CLONE` |
+| 闪烁 | 全屏 `M5Canvas` sprite，整页画完一次推送 |
+| 启动失败只有一声闷响 | `startEmulation()` 现在给四种不同的 `startFail` 文案上屏，不再三种拒绝共用一个 beep |
+
+两个刻意保留的约束：
+
+1. **`REPLAY` 页的 UP/DOWN 什么都不做。** 换「正在发射的卡」必须走 `CARDS` 页再按 ENTER，
+   免得蹭到一下方向键就悄悄把门禁卡换了——在门口这是最坏的一种失误。
+2. **横幅在会话进行中直接画到面板上，不走 sprite。** 整页 sprite 推送要 15–20 ms，
+   足够让芯片错过读卡器的 frame-wait 窗口；库自带示例做的是同一件事（会话中重画一个 32×16 的状态框），
+   这里只是把那个框放大成横幅，并且**只在状态跳变时**画。整页 `redraw()` 仍然只发生在 `None`/`Off` 和按键时。
+
+排版是**算出来的，不是估的**：`setTextFont(1)` → `fontdata[1] == Font0` → `GLCDfont{font, font0_info, 6, 8, 7}`
+（`lgfx_fonts.cpp:2441`），固定 6×8 点阵，所以每格宽度精确等于 6 px。据此：
+`KEYS` 页 6 行键位 + 4 行说明用 10 px 行距，占 y=15..116，页脚横线在 118；
+`CARDS` 页 `kRows` 从 6 提到 **7**（y=15..113），8 条记录里 7 条能一屏看完。
+另外写了一个离屏脚本按同样坐标和 RGB565 值生成逐像素预览，并机器检查了 6 张图里
+176 段文本的越界与同行重叠——0 处。**但预览只是排版检查，屏上观感仍要用户自己确认。**
+
+**还没验证的、也是唯一要紧的那一步**：真实读卡器会不会认。这个只能人走到门前试。
+建议的顺序是**先用手机试**——手机 NFC 靠近应该能让状态从 `O` 跳到 `I`/`R`/`A`，
+在书桌前就能确认「芯片确实在发射、确实能被别的设备看到」，再走去门口，
+免得把「载具方案根本不工作」和「门禁要认证」两件事混在一次走动里。
+
+#### 对 Stage 2 的影响
+
+「复制信号开门」是不是一个功能，**取决于门禁读卡器认不认证，而这一个问题只能上机回答**。
+所以 Stage 2 的范围要等这次门口测试的结果再定：
+
+- **零命令 + 门开了** → 回放是真实可用的功能，Stage 2 按「读卡 + 保存 + 回放」三件套做。
+- **出现 `0x60`/`0x61`** → 回放这条路对本库是死的，Stage 2 缩成「读卡 / dump / 保存」，
+  并且要在 UI 上**明确分三档说清能力边界**，不能笼统写「支持 MIFARE Classic」——
+  这正是 Stage 2 六条硬要求里的第 3 条，现在有了具体的失败模式做例子。
+
+### 12.5 分阶段计划
+
+| 阶段 | 内容 | 能否只靠编译验证 |
+|---|---|---|
+| **0** | 依赖验证 spike | ✅ **已完成** |
+| **1** | 抽出 app 抽象与注册表（纯重构，行为不变） | ⚠️ 不能——RF 采集/回放是否回归必须上机 |
+| **2** | NFC app（读 UID / dump / 保存） | ⚠️ 部分——能不能读到卡必须上机 |
+| **3** | 射频互斥框架（WiFi/BLE/CC1101 不并发） | ⚠️ 不能——ISR 抖动只能实测 |
+
+Stage 1 要定下来并写进本文档的：什么是共享的（display / keyboard / 心跳 / 电池），
+什么是每个 app 私有的（射频栈、store）。`src/app.cpp` 现在是 **1505 行单体**，首页五项是硬编码的。
+
+**Stage 1 的风险要点**：§1 记着「本轮改动全部只编译验证过，没有上机测过」，§3 的按键卡死也还没定案。
+**在未验证的基座上做大重构，等于把两个未知叠在一起。** 理想顺序是先上机确认 §10 第 9 条那两步
+（压力测试 + 重采 4 条记录），再动 app.cpp。
+
+### 12.6 未决
+
+1. **本仓库要不要加 LICENSE。** 现在没有。一旦引入 LGPL 的 libssh，义务就来了。
+   加了 license 也顺便解决 §11 里「public 但没声明授权」的悬空状态。
+2. **NFC 采集记录存哪里**：`spiffs`（1.5 MB，未挂载，掉电可靠）还是 SD 卡（容量大，但要插卡）。
+   倾向前者——SD 是可选件，NFC 记录不该依赖它。
+3. **SSH 到底要哪个方向**：client（连出去）还是 server（连进来），交互式 shell 还是跑几条固定命令。
+   答案决定是上 libssh（LGPL，~450 KB）还是 telnet（~10 KB，无法律负担）。
+4. `app1` 做 recovery 镜像的话，怎么触发回滚、以及它和 §10 第 4 条那个 G0 下载模式怎么配合。
+
+
+---
+
+## 13. NFC 工具固件（2026-11-11 凌晨，`nfc-read`）
+
+一个固件、一个首页菜单、四件事：
+
+| 菜单项 | 作用 | 按键 |
+|---|---|---|
+| `NFC READ` | 扫卡并维护收藏夹 | `S` 扫描，`ENTER` 详情，`N` 改名，`D` 删除，`esc` 返回 |
+| `NFC USE` | 把选中的卡放上射频 | `ENTER` 重新上膛，`;`/`.` 换卡，`esc` 停止并返回 |
+| `BACKUP TO TF` | 收藏夹整份写到 SD | `ENTER` |
+| `RESTORE FROM TF` | 从 SD 读回 | `ENTER` + YES/NO 确认（默认 NO） |
+
+存储：SPIFFS `/nfc/cards.txt` 为主，SD `/nfc/cards.bak` 为备份槽（`src/nfc_store.h`）。
+旧 `nfc-spike` 留下的 `/nfc/capture.log` 会在收藏夹不存在时**自动迁移**（已验证：8 条全部迁入）。
+
+### 13.1 两个把这一轮拖了很久的 bug
+
+**1. 键盘芯片 TCA8418 会被高频 I2C 打死。**
+症状：按键几下后整机"冻住"，屏幕不动、按键无反应；串口心跳正常（主循环在跑），
+但 `KEY_LCK_EC(0x03)=00`（芯片自己都没计数），`CFG(0x01)=01`（I2C 还能读）、INT 一直是高。
+根因：`renderHeader()` 里**每帧**（30 Hz）调 `M5.Power.getBatteryLevel()`，加上 NFC 栈起来后
+I2C 负载更高，键盘控制器的扫描被搞停。改法：**电量 3 秒缓存一次**（照 `src/app.cpp` 的做法）。
+补充事实：这个状态**MCU 复位清不掉**（软复位也不够），只有**拔电**能恢复；
+所以还加了每 8 秒自动重初始化键盘兜底。
+> 排查口径：以后遇到"屏幕不动"，先看心跳里 `ev` 是否还在涨、`klck` 是否为 0，再判断是键盘还是渲染。
+
+**2. `NFC USE` 看起来卡死，其实是整页没画。**
+`emulating` 一置位，主循环就切到"只重绘 16px 状态条"的分支，而 USE 整页**从未被绘制过**，
+屏幕上留的还是首页 → 看起来像冻住。**关键线索：按 `esc` 能退出**，说明程序没死。
+改法：进 USE 时先 `render()` 一次、`startEmulation()` 后再 `render()` 一次；
+`emu.auth` 变化时也要整页重绘（判定带依赖它）。
+> 教训：只重绘局部的优化，必须保证"整页至少画过一次"。
+
+### 13.2 已验证（2026-11-11 01:4x，上机）
+
+```
+[read] addSPI=1 units.begin=1
+[read] store=SPIFFS cards=8 err=-
+[read] kbd cfg=01 int=00
+[read] t=35049 keys=5 homeSel=1 ev=10 int=0 kcfg=01 klck=01     <- 键盘正常在跑
+[read] key 0x2 scr=0 homeSel=1 sel=0                            <- `.` 下移
+[read] ready=1 cards=8/24 ... scr=4 emulating=1 state=...       <- USE 页
+```
+
+- 四项菜单上下可选、ENTER 可进 ✅
+- 读取页：扫描入库、列表显示**完整 UID** + 类型缩写 + 读取次数 ✅
+- 详情页：`NAME / UID / TYPE / ATQA / READ` 分行带标签 ✅
+- `NFC USE` 页面正常显示：卡名/UID、状态横幅、判定带、底部键位 ✅
+- `BACKUP/RESTORE` 目前报 `NO SD CARD`（手头没插 TF 卡），代码路径未实测 ⚠️
+
+### 13.3 还没验证的
+
+1. **USE 真的能被读卡器看到吗**：拿手机靠近，看状态横幅是否从 `WAITING FOR READER` 变到
+   `READER HAS THE UID`；门口读卡器是否会 `NEEDS A KEY - CANNOT REPLAY`（0x60/0x61）。
+2. **TF 备份/恢复**：插卡后跑一遍 `BACKUP TO TF` → 拔卡 → `RESTORE FROM TF`。
+3. 键盘自愈（每 8 秒重初始化）是否会丢按键，需要长时间按键测试。
+
+### 13.4 环境
+
+```
+pio run -e nfc-read -t upload --upload-port COM10
+```
+
+Flash 约 735 KB / RAM 27 KB；`nfc-spike`（多协议探针）和 `nfc-emu`（纯模拟，旧）仍在，
+后者已被 `nfc-read` 的 `NFC USE` 取代，可以把 `nfc-emu` 退役。
+### 13.5 NFC 模拟（NFC USE）实测结论（2026-11-11）
+
+**读取侧完全可用，模拟侧在这块硬件 + 这个库上做不到开门。**
+
+实测过程（全部上机）：
+
+| 尝试 | 结果 |
+|---|---|
+| 运行时 `configureEmulationMode()` 切换 | 状态机显示已上膛（`state=Off`），但**射频上不应答** |
+| 改为重启切换模式（`cfg.emulation` 在 `Units.begin()` 前设好） | 真的在发射了：`emulate uid=2BF6276F atqa=0004 sak=08 carrier=Ultralight` |
+| 手机当读卡器贴上去 | 手机报「读卡失败，本卡片可能不是NFC卡片」——**能听到应答，但过不了类型判定** |
+| 门口读卡器 | 毫无反应 |
+| 身份呈现改为「一致的 Ultralight」（`T` 键切换） | 仍然不行 |
+| 会话期间静默（不打印，避免打断应答） | 仍然不行 |
+
+**这张门禁卡的性质**：手机 App 复制同一张卡后**能开门** → 门禁只认 UID，不做 crypto1 认证。
+也就是说理论上模拟可行，卡在**模拟实现的射频层细节**上。
+
+**为什么难**：M5Unit-NFC 的模拟层只支持 NTAG/Ultralight 载具，`load_config()` 只写
+UID/ATQA/SAK，没有 crypto1，也没有运行时模式切换（这就是为什么 `nfc-emu` 原本是独立固件）。
+手机能听到说明帧在发，但读卡器侧还要过 ATQA/SAK/SELECT 的一致性判定，这一步这个库没打磨过。
+
+**如果还要做「复制卡开门」，现实的三条路**：
+
+1. **换 PN532**（约 ¥30，I2C/SPI）：它有专门的 target 模式，社区里用来做 UID 复制的案例多，
+   成功率高得多；代价是要重新接一个模块、换库。
+2. **ChameleonUltra / Flipper** 这类专用设备，直接就是干这个的。
+3. **放弃模拟**：这块 CAP.CC1101 就做「读取 + 收藏 + 备份」，模拟功能从菜单里去掉，
+   避免给人「按了没反应」的错觉。
+
+**保留在代码里的东西**：`NFC USE` 页、身份切换、重启切换模式、静默应答——都是对的，
+换到能用的射频层（PN532）时这些 UI 和状态机可以直接搬。
+### 13.6 ✅ 复制卡开门成功（2026-11-12 00:0x，上机验证）
+
+**门开了。** 下面是唯一验证通过的组合，改任何一项都要重新验证。
+
+| 项 | 取值 |
+|---|---|
+| 载具类型 | `Type::MIFARE_Ultralight`（4 字节 UID）或 `NTAG_215`（7 字节） |
+| 内存镜像 | **Ultralight 页布局**：`mem[0..3]=UID`、`mem[4]=BCC(UID)`、后面留 0（7 字节 UID 用官方的 `embed_uid()`） |
+| ATQA / SAK | **用采集到的真值覆写**（本例 MIFARE Classic 1K：`ATQA=0004`、`SAK=08`），不要用载具自己的 |
+| 每轮必须调 | `Units.update()` **和** `emu.update()`（官方例程的 `loop()` 就是这样） |
+| 串口打印 | 会话期间**绝对不能打印**（库的示例原话：printing stops the emulation answering） |
+| 模式配置 | `cfg.emulation = true` 必须在 `Units.begin()` **之前**（所以靠重启切换模式，NVS 存一个字节） |
+
+关键排错过程（都可以复现）：
+
+| 版本 | 手机 | 门口读卡器 |
+|---|---|---|
+| 运行时 `configureEmulationMode()` 切换 | 看不到 | 无反应 |
+| 重启切换模式（`cfg.emulation` 正确） | 「已存在这张卡」（UID 读对） | 状态机 `Off→Idle→Ready`，**不进阶到 Active**，门不开 |
+| + ATQA/SAK 改成 Classic 1K 真值 | — | **门开了** |
+
+**两个此前误判的点**：
+
+1. **UID 搞错了**：列表里第一张卡是 `2BF6276F`，而门卡是 `3C02B611`。`NFC USE` 默认选第一张，
+   于是门口测的全是错的卡——白白浪费了好几轮。「门口没反应」的真正原因有一半是这个。
+2. **ATQA/SAK 必须与真卡一致**：读卡器在 SELECT 之后会按 ATQA/SAK 决定这张卡该怎么处理。
+   只把 UID 放上去、类型报成载具默认的 Ultralight，读卡器就停在 Ready 不执行。
+
+**状态机颜色**（官方例程那块色块，排错时很好用）：
+红=Off、蓝=Idle、黄=Ready、绿=Active、品红=Halt。门口的读卡器如果能推到 Ready 说明 UID 已经读到了。
+---
+
+## 14. retry/：干净的 NFC 工具（2026-11-12 00:35，✅ 上机全通）
+
+`Y:\2026\cardputer\retry\` 是一个**独立工程**，按官方例程重写，三个功能都验证通过：
+
+| 功能 | 状态 |
+|---|---|
+| 读卡（`READ CARDS`，S 扫描，自动入库） | ✅ |
+| 存储（SPIFFS `/nfc/retry.txt`，自动从主固件 `cards.txt` 导入一次） | ✅ 导入 2 条 |
+| 模拟（`CARD LIST` → ENTER → 重启进入模拟） | ✅ **门口开门** |
+
+```
+pio run -d Y:\2026\cardputer\retry -e retry-emu -t upload --upload-port COM10
+```
+
+### 14.1 为什么它能成而 `nfc-read` 不能
+
+`nfc-read` 是在读卡器固件（含键盘、SPIFFS、SD、64 KB sprite、心跳、状态机）上"加"了模拟，
+而模拟对时序极其敏感。retry 把模拟路径剥到和官方例程一样：
+
+| 项 | retry（能开） | nfc-read（不能开） |
+|---|---|---|
+| 模拟启动 | `cfg.emulation` 在 `Units.begin()` 前，靠重启切换 | 同样思路，但同进程里还有一大堆东西 |
+| 会话中键盘 | **只在 state=Off/None 时**每 400 ms 轮询一次 | 每 250 ms 轮询（会话中也在） |
+| 会话中重绘 | 只画 16 px 状态条，直接写面板 | 曾经整屏 pushSprite（64 KB / 15 ms） |
+| SD / SPIFFS | 模拟模式完全不挂载 SD | 曾在上膛前 `SD.begin()`/`SD.end()` |
+| 内存镜像 | 官方例程那份 64 B Ultralight 镜像 + 嵌入 UID | 自己拼的布局 |
+| 界面 | 直接画，无 sprite | 64 KB canvas |
+
+### 14.2 成功配方（最终版）
+
+1. `cfg.emulation = true; cfg.mode = NFC::A;` **在 `Units.begin()` 之前**，切换模式靠 NVS 标记 + 重启。
+2. `addSPI(units, unit, 10 MHz, 1)` → `units.begin()`。
+3. `picc.emulate(Type::MIFARE_Ultralight, uid, 4)`（7 字节 UID 用 `NTAG_215`）。
+4. **把采集到的 ATQA/SAK 写回** `picc.atqa/picc.sak`（本例 `0004`/`08`）。
+5. 把 UID 嵌进官方那份 Ultralight 内存镜像（4 字节：`mem[0..3]=uid; mem[4]=BCC`）。
+6. `emu.begin(picc, mem, sizeof(mem))`（64 B，别用 1 KB）。
+7. `loop()` 里 **`units.update()` 再 `emu.update()`**，中间不插入任何慢操作。
+8. 会话中**绝不打印**（库的示例原话），状态条直接画面板。
+
+### 14.3 两个反复踩到的坑（与模拟无关，但会伪装成模拟故障）
+
+1. **键盘芯片 TCA8418 被高频 I2C 打死**：状态"屏幕不动、按键全无响应"，`ev` 不涨、
+   `KEY_LCK_EC=0`，I2C 仍可读。根因是每帧调 `M5.Power.getBatteryLevel()`（30 Hz I2C）。
+   **MCU 复位救不回来，只能拔电。** 修法：电量 3 秒缓存；模拟模式下几乎不碰 I2C。
+2. **UID 选错卡**：`CARD LIST` 第一张是 `2BF6276F`，而门卡是 `3C02B611`。
+   之前多轮"门口没反应"其实是模拟错了卡。
+
+### 14.4 待办
+
+- retry 还没有 TF 备份/恢复（主固件有，可移植）。
+- rename（`N` 键）已实现未测。
+- 主固件的 `nfc-read` 可以废弃，或者只保留其"读取+收藏"部分。

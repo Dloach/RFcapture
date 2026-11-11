@@ -5,6 +5,7 @@
 #include <esp_task_wdt.h>
 #include <memory>
 
+#include "launcher.h"
 #include "polling_keyboard.h"
 #include "trace.h"
 #include "tf_backup.h"
@@ -61,7 +62,7 @@ bool looksLikeOok(const RfFrame& f)
     return hasSync && total >= 20 && good * 100 >= total * 80;
 }
 
-constexpr int kHomeItems = 5;
+constexpr int kHomeItems = 3;
 
 }  // namespace
 
@@ -475,6 +476,12 @@ void App::handleAction(uint32_t action)
 
     // ---- home --------------------------------------------------------------
     if (screen_ == Screen::kHome) {
+        // Leaving the RF feature returns to the launcher's RF/NFC chooser.  The
+        // two features need incompatible chip configurations, so this is a reboot
+        // rather than a mode switch (see launcher.h).
+        if (action & kActBack) {
+            launcher::rebootInto(launcher::kAppMenu);
+        }
         if (action & kActUp) {
             homeSel_ = (homeSel_ + kHomeItems - 1) % kHomeItems;
             dirty_   = true;
@@ -502,12 +509,6 @@ void App::handleAction(uint32_t action)
                     break;
                 case 2:
                     enterScan();
-                    break;
-                case 3:
-                    backupSignals();
-                    break;
-                case 4:
-                    restoreSignals();
                     break;
             }
         }
@@ -1074,8 +1075,7 @@ void App::renderHome()
     renderHeader("RF CAPTURE", true);
 
     canvas_.setTextSize(2);
-    const char* items[kHomeItems] = {"CAPTURE", "SEND", "SCAN RF", "BACKUP TF",
-                                     "RESTORE TF"};
+    const char* items[kHomeItems] = {"CAPTURE", "SEND", "SCAN RF"};
     for (int i = 0; i < kHomeItems; ++i) {
         const int y         = 20 + i * 19;
         const bool selected = (i == homeSel_);
