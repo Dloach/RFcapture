@@ -39,6 +39,9 @@
 #include "nfc_cards.h"
 #include "sd_mount.h"
 #include "polling_keyboard.h"
+#include "bind_picker.h"
+#include "quick_bind.h"
+#include "ui_hint.h"
 
 using namespace m5::nfc;
 using namespace m5::nfc::a;
@@ -72,6 +75,8 @@ NFCLayerA nfcA{unit};
 EmulationLayerA emu{unit};
 
 bool nfcReady = false;
+
+void fieldOff();  // defined with scanOnce(), below; used by every reboot path
 
 // ---------------------------------------------------------------------------
 // Boot mode: reader or emulator.  One NVS namespace, two bytes.
@@ -107,6 +112,10 @@ void clearBoot()
 
 void rebootAs(const uint8_t mode, const uint8_t idx)
 {
+    // Kill the carrier before leaving: the ST25R3916 keeps its registers
+    // across an ESP32 restart, and a live 13.56 MHz field corrupts the SD
+    // mount in the next feature (and starves the keyboard).
+    if (nfcReady) fieldOff();
     Preferences p;
     if (p.begin(kNs, false)) {
         p.putUChar("mode", mode);
@@ -150,8 +159,14 @@ void hints(const Hint* h, const int n)
     int x = 3;
     for (int i = 0; i < n; ++i) {
         lcd.setTextColor(kOk, kBg);
-        lcd.drawString(h[i].key, x, kFooterY + 4);
-        x += lcd.textWidth(h[i].key);
+        if (h[i].key[0] == ';') {
+            // "; ." means "the orange arrow keys": draw them as triangles.
+            drawMoveTriangles(lcd, x, kFooterY + 4, kOk);
+            x += kMoveTrianglesW;
+        } else {
+            lcd.drawString(h[i].key, x, kFooterY + 4);
+            x += lcd.textWidth(h[i].key);
+        }
         lcd.setTextColor(kDim, kBg);
         lcd.drawString(h[i].text, x + 2, kFooterY + 4);
         x += lcd.textWidth(h[i].text) + 10;
@@ -260,16 +275,40 @@ void drawList()
         lcd.drawRightString(right, lcd.width() - 3, y);
     }
 
-    const Hint h[] = {{"ENT", "emulate"}, {"; .", "move"}, {"D", "delete"}, {"esc", "back"}};
-    hints(h, 4);
+    const Hint h[] = {{"ENT", "emu"}, {"B", "bind"}, {"; .", ""}, {"D", "del"}, {"esc", "back"}};
+    hints(h, 5);
 }
 
-// One detect() pass.  The field is switched off again immediately: leaving it on
-// while the page is open makes the keyboard controller stop scanning (it sits on
-// the same flex PCB), and a dead keyboard is only recoverable by a power cycle.
+// The antenna field, switched around each detect() pass.  Leaving it on while
+// the page is open makes the keyboard controller stop scanning (it sits on the
+// same flex PCB), and a dead keyboard is only recoverable by a power cycle.
+//
+// The ON half is load-bearing: the library switches the field on exactly once,
+// at the end of configure_nfc_a() (nfc_initial_field_on), and the transceive
+// path never touches tx_en again.  A previous version of this function only
+// switched the field OFF after each pass, so after the first 120 ms window the
+// antenna never radiated again and no card was ever seen.
+void fieldOn()
+{
+    uint8_t opctl = 0;
+    if (unit.readOperationControl(opctl)) {
+        unit.writeOperationControl(static_cast<uint8_t>(opctl | 0x48));  // rx_en | tx_en
+    }
+}
+
+void fieldOff()
+{
+    uint8_t opctl = 0;
+    if (unit.readOperationControl(opctl)) {
+        unit.writeOperationControl(static_cast<uint8_t>(opctl & ~0x08));  // tx_en
+    }
+}
+
 void scanOnce()
 {
+    if (!nfcReady) return;
     ++polls;
+    fieldOn();
     std::vector<PICC> piccs;
     if (nfcA.detect(piccs, 120)) {
         for (auto& p : piccs) {
@@ -299,12 +338,7 @@ void scanOnce()
         }
     }
     if (!piccs.empty()) nfcA.deactivate();
-
-    // Field off between passes (see the note above).
-    uint8_t opctl = 0;
-    if (unit.readOperationControl(opctl)) {
-        unit.writeOperationControl(static_cast<uint8_t>(opctl & ~0x08));  // tx_en
-    }
+    fieldOff();
 }
 
 void drawScan()
@@ -312,9 +346,9 @@ void drawScan()
     lcd.fillScreen(kBg);
     header("READ CARDS");
 
-    lcd.setTextColor(scanning ? kOk : kDim, kBg);
+    lcd.setTextColor(!nfcReady ? kWarn : (scanning ? kOk : kDim), kBg);
     lcd.setTextSize(2);
-    lcd.drawString(scanning ? "TAP A CARD" : "STOPPED", 10, 22);
+    lcd.drawString(!nfcReady ? "CHIP OFFLINE" : (scanning ? "TAP A CARD" : "STOPPED"), 10, 22);
     lcd.setTextSize(1);
 
     if (liveUid[0]) {
@@ -460,6 +494,7 @@ enum Action : uint32_t {
     kScan   = 1u << 4,
     kDelete = 1u << 5,
     kName   = 1u << 6,
+    kBind   = 1u << 7,
 };
 
 uint32_t prevActions = 0;
@@ -479,6 +514,7 @@ uint32_t readActions()
             case 's': case 'S': a |= kScan; break;
             case 'd': case 'D': a |= kDelete; break;
             case 'n': case 'N': a |= kName; break;
+            case 'b': case 'B': a |= kBind; break;
             default: break;
         }
     }
@@ -491,6 +527,32 @@ void startEmulationOf(int index)
     const nfccards::Card& c = nfccards::cards[index];
     if (!nfccards::replayable(c)) return;
     rebootAs(1, static_cast<uint8_t>(index));
+}
+
+// A failed arm used to reboot straight back to the reader menu with no message
+// -- at a door that reads as "pressed ENTER, screen went black, back at the
+// menu".  Say what failed and wait for esc instead.
+void emuFail(const char* reason)
+{
+    Serial.printf("[emu] FAILED: %s (nfcReady=%d)\n", reason, static_cast<int>(nfcReady));
+    lcd.fillScreen(kBg);
+    header("EMULATE");
+    lcd.setTextColor(kWarn, kBg);
+    lcd.setTextSize(2);
+    lcd.drawString(reason, 6, 28);
+    lcd.setTextSize(1);
+    lcd.setTextColor(kDim, kBg);
+    if (!nfcReady) {
+        lcd.drawString("The NFC chip did not come up.", 6, 56);
+        lcd.drawString("Unplug the board, then retry.", 6, 68);
+    }
+    lcd.drawString("esc: back to NFC menu", 6, 96);
+    for (;;) {
+        M5Cardputer.update();
+        if (readActions() & kBack) break;
+        delay(20);
+    }
+    rebootAs(0, 0);  // does not return
 }
 
 void handleKeys(uint32_t pressed)
@@ -508,7 +570,9 @@ void handleKeys(uint32_t pressed)
 
     if (pressed & kBack) {
         if (scr == Scr::kMenu) {
-            // Leave the NFC feature: back to the launcher's RF/NFC choice.
+            // Leave the NFC feature: kill the carrier first, same reason as
+            // rebootAs() above, then back to the launcher's RF/NFC choice.
+            if (nfcReady) fieldOff();
             launcher::rebootInto(launcher::kAppMenu);
         }
         if (scr == Scr::kScan) scanning = false;
@@ -567,6 +631,14 @@ void handleKeys(uint32_t pressed)
                 if (listSel >= listTop + kRows) listTop = listSel - kRows + 1;
             }
             if (pressed & kEnter) startEmulationOf(listSel);
+            if (pressed & kBind) {
+                if (nfccards::count) {
+                    // Modal picker: grid key, then icon, then color.
+                    bindpick::run(quickbind::kNfc, static_cast<uint8_t>(listSel),
+                                  nfccards::cards[listSel].name);
+                    dirty = true;
+                }
+            }
             if (pressed & kDelete) {
                 nfccards::remove(static_cast<int8_t>(listSel));
                 if (listSel >= nfccards::count) listSel = nfccards::count ? nfccards::count - 1 : 0;
@@ -621,9 +693,24 @@ void readerSetup()
         delay(300);
     }
 
+    // configure_nfc_a() ends with the carrier ON (nfc_initial_field_on).  Park
+    // it now: scans switch it on per pass and off again, and a field left
+    // radiating starves the keyboard -- and corrupts the next feature's SD
+    // mount, because the chip keeps this register across an ESP32 restart.
+    if (nfcReady) fieldOff();
+
     // Keyboard last: the polling reader is I2C traffic, and anything that touches
     // the bus while the NFC unit is being brought up has been a source of grief.
+    // The detach must come first (src/app.cpp:82), or the destroyed stock reader
+    // leaves a dangling handler on GPIO 11.
+    detachInterrupt(digitalPinToInterrupt(RF_KBD_INT));
     M5Cardputer.Keyboard.begin(std::unique_ptr<KeyboardReader>(new PollingKeyboardReader()));
+
+    if (!nfcReady) {
+        // Reading is silently dead without this on screen: detect() on a chip
+        // that never came up returns false forever and the page looks "alive".
+        snprintf(statusMsg, sizeof(statusMsg), "NFC OFFLINE - unplug, retry");
+    }
 
     nfccards::load();
     Serial.printf("[read] cards=%u err=%s\n", static_cast<unsigned>(nfccards::count),
@@ -716,9 +803,16 @@ void emulatorSetup(uint8_t idx)
         delay(300);
     }
 
+    // Same polling keyboard as the reader half -- emuFail() below waits for a
+    // key, and the stock edge-driven reader dies after a handful of presses.
+    detachInterrupt(digitalPinToInterrupt(RF_KBD_INT));
+    M5Cardputer.Keyboard.begin(std::unique_ptr<KeyboardReader>(new PollingKeyboardReader()));
+
+    if (!nfcReady) emuFail("NFC CHIP OFFLINE");  // waits for esc, never returns
+
     nfccards::load();
     if (nfccards::count == 0) {
-        rebootAs(0, 0);
+        emuFail("NO CARDS STORED");
     }
     emuIdx = idx % nfccards::count;
 
@@ -729,8 +823,7 @@ void emulatorSetup(uint8_t idx)
     // Ultralight, 7-byte on NTAG215.
     const Type carrier = (c.len == 7) ? Type::NTAG_215 : Type::MIFARE_Ultralight;
     if (!picc.emulate(carrier, c.uid, c.len)) {
-        Serial.println("[emu] emulate() failed");
-        rebootAs(0, 0);
+        emuFail("CARD NOT EMULATABLE");
     }
     // The captured identity wins over the carrier's defaults.  This is the pair
     // the gate reader decides on after selecting the UID.
@@ -748,8 +841,7 @@ void emulatorSetup(uint8_t idx)
     }
 
     if (!emu.begin(picc, piccMemory, sizeof(piccMemory))) {
-        Serial.println("[emu] begin() failed");
-        rebootAs(0, 0);
+        emuFail("ARM FAILED");
     }
     emu.setExpiredTime(10000);
 
@@ -807,6 +899,18 @@ namespace nfcapp {
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
+void queueEmulation(uint8_t idx)
+{
+    // Same flag rebootAs(1, idx) writes, without the restart: the caller (the
+    // launcher's home grid) does the reboot itself through rebootInto().
+    Preferences p;
+    if (p.begin(kNs, false)) {
+        p.putUChar("mode", 1);
+        p.putUChar("idx", idx);
+        p.end();
+    }
+}
+
 void setup()
 {
     auto cfg = M5.config();

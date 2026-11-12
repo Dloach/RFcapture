@@ -7,6 +7,9 @@
 
 #include "launcher.h"
 #include "polling_keyboard.h"
+#include "bind_picker.h"
+#include "quick_bind.h"
+#include "rf_replay.h"
 #include "trace.h"
 #include "tf_backup.h"
 
@@ -438,6 +441,7 @@ uint32_t App::readActions()
             case 'd': case 'D': a |= kActDelete; break;
             case 'c': case 'C': a |= kActClear; break;
             case 'n': case 'N': a |= kActRename; break;
+            case 'b': case 'B': a |= kActBind; break;
             case KEY_ENTER: a |= kActEnter; break;
             case KEY_BACKSPACE: a |= kActBack; break;
             default: break;
@@ -586,6 +590,16 @@ void App::handleAction(uint32_t action)
             dirty_ = true;
         }
         if (action & (kActSend | kActEnter)) sendSaved();
+        if (action & kActBind) {
+            if (saved_.empty()) {
+                toast("NO SAVED SIGNAL");
+            } else {
+                // Modal picker: grid key, then icon, then color.
+                bindpick::run(quickbind::kRf, static_cast<uint8_t>(sendSel_),
+                              saved_.at(sendSel_).name);
+                dirty_ = true;
+            }
+        }
         if (action & kActDelete) {
             if (!saved_.empty()) {
                 confirmKind_ = ConfirmKind::kDeleteSaved;
@@ -775,11 +789,11 @@ App::TxReport App::transmit(const uint16_t* pulses, int count, uint16_t baseUs, 
     // derived from the length of the stored train so the duration is fixed.
     int trainStart = 0;
     int trainEnd   = count;
-    wholeFrameRange(pulses, count, baseUs, &trainStart, &trainEnd);
+    rfreplay::wholeFrameRange(pulses, count, baseUs, &trainStart, &trainEnd);
     const uint16_t* train = pulses + trainStart;
     r.trainCount          = trainEnd - trainStart;
 
-    r.reps = planRepeats(train, r.trainCount, &r.durMs);
+    r.reps = rfreplay::planRepeats(train, r.trainCount, &r.durMs);
     r.ok   = tx_.send(train, r.trainCount, r.reps, 0);
 
     // The PA stage can leave the chip in an odd state; re-apply the whole band
@@ -1057,6 +1071,14 @@ void App::renderFooterHints(const FooterHint* hints, int count)
     for (int i = 0; i < count; ++i) {
         if (hints[i].key == nullptr) break;
 
+        // Skip what does not fit: a string that crosses the right edge wraps to
+        // the next line, which is off-screen -- the hint vanishes entirely.
+        const int need = canvas_.textWidth(hints[i].key) +
+                         ((hints[i].text != nullptr && hints[i].text[0] != 0)
+                              ? 2 + canvas_.textWidth(hints[i].text)
+                              : 0);
+        if (x + need > canvas_.width()) break;
+
         canvas_.setTextColor(kColOk, kColBg);
         canvas_.drawString(hints[i].key, x, y);
         x += canvas_.textWidth(hints[i].key);
@@ -1066,7 +1088,7 @@ void App::renderFooterHints(const FooterHint* hints, int count)
             canvas_.drawString(hints[i].text, x + 2, y);
             x += 2 + canvas_.textWidth(hints[i].text);
         }
-        x += 7;
+        x += 6;
     }
 }
 
@@ -1077,7 +1099,10 @@ void App::renderHome()
     canvas_.setTextSize(2);
     const char* items[kHomeItems] = {"CAPTURE", "SEND", "SCAN RF"};
     for (int i = 0; i < kHomeItems; ++i) {
-        const int y         = 20 + i * 19;
+        // Three items spread across the whole 13..118 body rather than stacked
+        // at the top: y = 30/58/86 leaves the selection boxes centred with the
+        // footer rule at 118.
+        const int y         = 30 + i * 28;
         const bool selected = (i == homeSel_);
         if (selected) {
             canvas_.fillRect(4, y - 4, canvas_.width() - 8, 22, kColBar);
@@ -1197,9 +1222,9 @@ void App::renderCapture()
         static const FooterHint kClearHints[] = {{"C", "again to clear all"}};
         renderFooterHints(kClearHints, 1);
     } else {
-        static const FooterHint kCapHints[] = {{"ENT", "save"}, {"S", "send"},
-                                               {"F", "band"}, {"esc", "back"}};
-        renderFooterHints(kCapHints, 4);
+        static const FooterHint kCapHints[] = {{"ENT", "save"}, {"S", "send"},  {"F", "band"},
+                                               {"C", "clr"},   {"esc", "back"}};
+        renderFooterHints(kCapHints, 5);
     }
 }
 
@@ -1242,9 +1267,9 @@ void App::renderSend()
         canvas_.drawRightString(right, canvas_.width() - 3, y);
     }
 
-    static const FooterHint kSendHints[] = {{"S", "send"},    {"N", "rename"},
-                                            {"del", "del"},   {"esc", "back"}};
-    renderFooterHints(kSendHints, 4);
+    static const FooterHint kSendHints[] = {{"S", "send"},  {"N", "rename"}, {"B", "bind"},
+                                            {"del", "del"}, {"esc", "back"}};
+    renderFooterHints(kSendHints, 5);
 }
 
 void App::renderConfirm()
@@ -1311,22 +1336,6 @@ void App::renderRename()
 // RF_TX_TARGET_MS.  Deriving it from the measured length of the train keeps the
 // on-air time constant whether the capture holds one 50 pulse frame or a
 // multi-frame train from an older firmware.
-int App::planRepeats(const uint16_t* pulses, int count, uint32_t* durMs) const
-{
-    uint32_t trainUs = 0;
-    for (int i = 0; i < count; ++i) trainUs += pulses[i];
-    if (trainUs == 0) trainUs = 1;
-
-    const uint32_t targetUs = static_cast<uint32_t>(rfcfg::txTargetMs) * 1000u;
-    int reps = static_cast<int>((targetUs + trainUs - 1) / trainUs);
-    if (reps < rfcfg::txRepeats) reps = rfcfg::txRepeats;
-    if (reps > rfcfg::txMaxRepeats) reps = rfcfg::txMaxRepeats;
-
-    if (durMs != nullptr) {
-        *durMs = static_cast<uint32_t>((static_cast<uint64_t>(trainUs) * reps) / 1000ull);
-    }
-    return reps;
-}
 
 // ---------------------------------------------------------------- RSSI scan --
 
@@ -1468,23 +1477,6 @@ void App::renderScan()
 // head is deliberately left alone: older records carry a few leading pulses that
 // the receiver tolerates, and trimming there would change signals that currently
 // work.
-void App::wholeFrameRange(const uint16_t* pulses, int count, uint16_t baseUs, int* start,
-                          int* end) const
-{
-    *start = 0;
-    *end   = count;
-    if (pulses == nullptr || count < 8 || baseUs < 60) return;
-
-    // Levels are implied by parity: index 0 is the sync HIGH, so the long sync
-    // LOW sits at an odd index.
-    const uint32_t limit = 6u * baseUs;
-    int last = -1;
-    for (int i = 1; i < count; i += 2) {
-        if (pulses[i] >= limit) last = i - 1;
-    }
-    // Need at least one frame left, otherwise keep everything.
-    if (last > 8 && last < count) *end = last;
-}
 
 #if RF_GDO_TEST
 // Does GDO0 follow IOCFG0 at all?  On this module 0x2F drives the pin low and

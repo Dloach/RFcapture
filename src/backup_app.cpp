@@ -24,16 +24,19 @@
 #include "backup_app.h"
 
 #include <M5Cardputer.h>
+#include <SPIFFS.h>
 
 #include <memory>
 
 #include "launcher.h"
 #include "nfc_cards.h"
 #include "polling_keyboard.h"
+#include "quick_bind.h"
 #include "rf_config.h"
 #include "saved_store.h"
 #include "sd_mount.h"
 #include "tf_backup.h"
+#include "ui_hint.h"
 
 namespace backupapp {
 namespace {
@@ -82,8 +85,14 @@ void hints()
     int x               = 3;
     for (int i = 0; i < 3; ++i) {
         lcd.setTextColor(kOk, kBg);
-        lcd.drawString(keys[i], x, 122);
-        x += lcd.textWidth(keys[i]);
+        if (keys[i][0] == ';') {
+            // "; ." means "the orange arrow keys": draw them as triangles.
+            drawMoveTriangles(lcd, x, 122, kOk);
+            x += kMoveTrianglesW;
+        } else {
+            lcd.drawString(keys[i], x, 122);
+            x += lcd.textWidth(keys[i]);
+        }
         lcd.setTextColor(kDim, kBg);
         lcd.drawString(texts[i], x + 2, 122);
         x += lcd.textWidth(texts[i]) + 10;
@@ -138,6 +147,26 @@ void draw()
     hints();
 }
 
+// The quick-bind table rides along as a plain file copy: SPIFFS /quick.txt
+// <-> SD /quick.txt, same "one obvious backup slot" rule as the NFC cards.
+bool copyFile(fs::FS& from, const char* src, fs::FS& dst, const char* dstPath)
+{
+    if (!from.exists(src)) return true;  // nothing to copy is not an error
+    File in = from.open(src, FILE_READ);
+    if (!in) return false;
+    File out = dst.open(dstPath, FILE_WRITE);
+    if (!out) {
+        in.close();
+        return false;
+    }
+    uint8_t buf[128];
+    int n;
+    while ((n = in.read(buf, sizeof(buf))) > 0) out.write(buf, static_cast<size_t>(n));
+    in.close();
+    out.close();
+    return true;
+}
+
 void doBackup()
 {
     if (!sdOk) {
@@ -148,12 +177,13 @@ void doBackup()
     int rfCount = 0;
     const TfResult rf = tfbackup::saveSignals(saved_, &rfCount);
     const bool nfc    = nfccards::backupToSd();
+    const bool quick  = copyFile(SPIFFS, "/quick.txt", SD, "/quick.txt");
 
-    snprintf(statusMsg, sizeof(statusMsg), "RF %d %s | NFC %u %s", rfCount,
+    snprintf(statusMsg, sizeof(statusMsg), "RF %d %s|NFC %u %s|Q %s", rfCount,
              rf == TfResult::kOk ? "ok" : "fail", static_cast<unsigned>(nfccards::count),
-             nfc ? "ok" : "fail");
-    Serial.printf("[backup] rf=%d n=%d nfc=%d msg=%s\n", static_cast<int>(rf), rfCount,
-                  static_cast<int>(nfc), statusMsg);
+             nfc ? "ok" : "fail", quick ? "ok" : "fail");
+    Serial.printf("[backup] rf=%d n=%d nfc=%d quick=%d msg=%s\n", static_cast<int>(rf), rfCount,
+                  static_cast<int>(nfc), static_cast<int>(quick), statusMsg);
     dirty = true;
 }
 
@@ -167,12 +197,14 @@ void doRestore()
     int rfCount         = 0;
     const TfResult rf   = tfbackup::loadSignals(saved_, &rfCount);
     const bool nfc      = nfccards::restoreFromSd();
+    const bool quick    = copyFile(SD, "/quick.txt", SPIFFS, "/quick.txt");
+    if (quick) quickbind::load();  // make the restored bindings live now
 
-    snprintf(statusMsg, sizeof(statusMsg), "RF %d %s | NFC %u %s", rfCount,
+    snprintf(statusMsg, sizeof(statusMsg), "RF %d %s|NFC %u %s|Q %s", rfCount,
              rf == TfResult::kOk ? "ok" : "fail", static_cast<unsigned>(nfccards::count),
-             nfc ? "ok" : "fail");
-    Serial.printf("[backup] restore rf=%d n=%d nfc=%d msg=%s\n", static_cast<int>(rf), rfCount,
-                  static_cast<int>(nfc), statusMsg);
+             nfc ? "ok" : "fail", quick ? "ok" : "fail");
+    Serial.printf("[backup] restore rf=%d n=%d nfc=%d quick=%d msg=%s\n", static_cast<int>(rf),
+                  rfCount, static_cast<int>(nfc), static_cast<int>(quick), statusMsg);
     confirmRestore = false;
     dirty          = true;
 }
@@ -196,6 +228,14 @@ void setup()
 
     saved_.begin();
     nfccards::load();
+
+    // First paint BEFORE the SD mount: the launcher's splash is still on the
+    // panel from before the reboot, and replacing it with this page (rather
+    // than a blank) is what makes the transition read as a load, not a blackout.
+    lcd.fillScreen(kBg);
+    header();
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawString("Mounting TF card...", 6, 60);
 
     // The bus is untouched at this point -- neither radio has been initialised in
     // this boot -- so this is the one place the SD card can be mounted safely.

@@ -39,6 +39,10 @@ public:
     /// Asynchronous OOK transmit: GDO0 becomes the data input.
     bool enterTx();
 
+    /// Park the chip: SIDLE, no carrier, no receive.  The launcher uses this
+    /// after a quick send so the module sits quiet on the home page.
+    void idle();
+
     /// Diagnostic helpers.
     uint8_t marcState() { return readReg(0x35) & 0x1F; }
     uint8_t iocfg0() { return readReg(0x02); }

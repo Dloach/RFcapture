@@ -293,6 +293,11 @@ bool Cc1101::enterTx()
     return true;
 }
 
+void Cc1101::idle()
+{
+    strobe(kSidle);
+}
+
 int Cc1101::rssiDbm()
 {
     // RSSI is a signed 8 bit value in 0.5 dB steps; the datasheet conversion is

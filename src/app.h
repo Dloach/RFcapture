@@ -41,6 +41,7 @@ private:
         kActRename = 1u << 8,
         kActLeft   = 1u << 9,
         kActRight  = 1u << 10,
+        kActBind   = 1u << 11,
     };
 
     uint32_t readActions();
@@ -65,14 +66,6 @@ private:
     void confirmSave();
     void backupSignals();
     void restoreSignals();
-
-    /// Narrow a stored train to a whole number of frames (first sync pulse up
-    /// to the last sync pulse), so repeating it stays perfectly periodic.
-    void wholeFrameRange(const uint16_t* pulses, int count, uint16_t baseUs, int* start,
-                         int* end) const;
-
-    /// Repeats needed to keep one "send" on air for RF_TX_TARGET_MS.
-    int planRepeats(const uint16_t* pulses, int count, uint32_t* durMs) const;
 
     /// What one transmit() call actually put on air, for the caller's log line.
     struct TxReport {

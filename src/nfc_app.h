@@ -19,4 +19,9 @@ namespace nfcapp {
 void setup();
 void loop();
 
+// Queue a boot straight into emulation of card `idx` (writes the nfcretry boot
+// flag).  The caller then reboots into kAppNfc -- launcher.h's rebootInto().
+// Used by the home grid's one-key emulation.
+void queueEmulation(uint8_t idx);
+
 }  // namespace nfcapp
