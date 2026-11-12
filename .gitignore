@@ -16,3 +16,10 @@ tests/host/test_decoder
 # captured them - docs/README.md 2.2 explains how to regenerate one.
 docs/signals-*.log
 *.local.log
+
+# Serial captures from debug sessions (cap-serial.py output).
+docs/cap-*.log
+
+# Standalone reference project used during NFC bring-up (superseded by the
+# unified firmware's NFC TOOLS); kept on disk, not in git.
+retry/
