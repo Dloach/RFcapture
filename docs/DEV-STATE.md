@@ -1,8 +1,27 @@
-# 开发状态交接（最后更新 2026-11-09）
+# 开发状态交接（最后更新 2026-11-12）
 
 换机器继续开发前记录。**代码在 NAS 上，不在任何 Qoder 会话目录里**：
 macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\cardputer`——同一个目录，别另存一份。
 上一轮会话的串口日志留在原 Mac 的 `/tmp/cap.log`（不随项目走），需要时用 `tools/cap-serial.py` 重抓。
+
+## 0. 当前真相（先读这一节）
+
+| 主题 | 当前结论 |
+|---|---|
+| 功能结构 | launcher 三功能 **RF TOOLS / NFC TOOLS / BACKUP** + 右侧 3×3 九宫格；每个功能一次重启 |
+| RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
+| NFC × TF 共存 | **已解决**，见 §7.1：挂 SD 前对 ST25R3916 发 `CMD_SET_DEFAULT`，不要再打 G3 脉冲 |
+| NFC 模拟配方 | **§14.2 是唯一权威**；§13.6 是首次成功记录，§13.5 是已被推翻的历史（当时判定“做不到”） |
+| NFC 实验代际 | `nfc_spike/nfc_emu/nfc_example/nfc_store` 已在 **v1.1.0** 删除；历史见 tag `archive-nfc-spikes-2026-11-12` |
+| 快捷绑定 | `quick.txt` 6 字段（slot/kind/index/icon/color/key）；按 UID/code 的稳定 key 解析，失效显式 `BINDING STALE` |
+| 永久列表撕裂 | P0-2 已改为 blob→count 提交 + 按字节数自愈；`recoverSavedCount()` 有 host 测试 |
+| 同码重采 | P0-3：新波形分数显著更高时自动替换，`BETTER WAVE`；再次 ENTER 可更新永久列表 |
+| host 测试 | **43 项全过**（g++ 15.2 / WSL 验证） |
+
+> 下面 §1–§14 是历史记录，按时间保留；与 §0 冲突时以 §0 和最新代码为准。
+> `retry/` 是独立参考工程，源码仍在 git 中；不要在出货固件里引用它。
+
+---
 
 > 15:15 更新：另一轮开发把接收从 RMT 换成了 GPIO 中断、解码只取同步头后 24 位、加了 `[trace]` 噪声帧日志，
 > 并把回放帧间空隙改成 12.5ms——这导致新采集的单帧记录发不动铁闸。已定案并修复：
@@ -27,15 +46,16 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 > **2026-11-09 更晚（入库 + 立项，没有改任何出货代码）**：仓库脱敏后推到 public（**§11**）；
 > 决定把固件改造成多功能系统，架构定为「单体 + 运行时 app 注册表」，第一个功能选 NFC，
-> 依赖验证 spike 已编译通过（**§12**，`pio run -e nfc-spike`）。
-> **§12 是本文件里唯一 forward-looking 的一节，其余都是已发生的事实。**
+> 依赖验证 spike 当时编译通过（**§12**）。这些 spike 文件已在 v1.1.0 删除，见 §0。
+> **§0 是当前真相；以下 §1–§14 是按时间保留的历史记录。**
 
 ---
 
-## 1. 当前固件：功能完整，已上机验证
+## 1. 2026-11-09 固件快照（历史）
 
-最近一次 `pio run`：**Flash 635945 B / 19.0%，RAM 26264 B / 8.0%**（`diag-off` 环境：632961 B / 26256 B）。
-`platform = espressif32@6.13.0` 已锁死（原因见 §5 硬约束）。
+当时的 `pio run`：**Flash 635945 B / 19.0%，RAM 26264 B / 8.0%**（`diag-off` 环境：632961 B / 26256 B）。
+`platform = espressif32@6.13.0` 已锁死（原因见 §5 硬约束）。下面是当时的单功能 RF 固件状态，
+不是当前三功能固件；当前状态看 §0。
 
 | 功能 | 状态 |
 |---|---|
@@ -46,7 +66,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | 永久保存（NVS，8 条） | ✅ 现有 4 条，**都是修 `onEdge()` 之前采的，建议重采**（见 §8.3） |
 | 发送：**RMT 硬件时序 + 零间隙连发 + 700ms 定长** | ✅ rollUP/rollDOWN/maindoor 实测都能开 |
 | CC1101 没接/没识别到时的降级 | ✅ 新增，标题栏显示 `NO RADIO`，RF 三项菜单拒绝进入（TF 备份/恢复仍可用） |
-| 首页 5 项：CAPTURE / SEND / SCAN RF / BACKUP TF / RESTORE TF | ✅ |
+| 首页 5 项：CAPTURE / SEND / SCAN RF / BACKUP TF / RESTORE TF | 历史；当前是 launcher 三功能 + 九宫格，见 §0 |
 | `SCAN RF` 扫频（7 频点 RSSI） | ✅ 实测 433 附近 -88、其他 -100 |
 | 采集页实时 RSSI 条 + 峰值保持 | ✅ |
 | TF 卡备份 / 恢复 | ✅ 之前已验证 |

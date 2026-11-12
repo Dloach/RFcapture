@@ -40,8 +40,8 @@ inline bool ensure(const bool cutRadioPower = false)
     }
 
     // Deselect the two radio chips while the card is talked to.  main.cpp does
-    // the same at boot; repeat it here because the deferred NFC-side SD actions
-    // (nfccards::runPendingAction) reach this function through a different path.
+    // the same at boot; repeat it here because the BACKUP feature can reach this
+    // function without having initialised either radio first.
     //
     // Never cut module power (POWER_EN, GPIO 3) to do this: while the module is
     // unpowered the live SPI pins feed its chips through their pin clamp diodes,

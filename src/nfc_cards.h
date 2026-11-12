@@ -7,7 +7,6 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include <Preferences.h>
 #include <SD.h>
 #include <SPI.h>
 
@@ -34,7 +33,10 @@ extern const char* lastError;
 
 int8_t find(const uint8_t len, const uint8_t* uid);
 bool save();
-int8_t add(const Card& c);
+/// Persist hit-counter changes at most once per 30 s, or immediately when
+/// `force` is set.  New cards / deletes / renames still save immediately.
+void flush(bool force = false);
+int8_t add(const Card& c, bool* isNew = nullptr);
 void remove(const int8_t i);
 void rename(const int8_t i, const char* name);
 bool replayable(const Card& c);
@@ -44,18 +46,9 @@ void uidToString(const Card& c, char* out, size_t n);
 /// this project has none yet).
 int8_t load();
 
-// SD backup / restore
+// SD backup / restore (used by the BACKUP feature, not by the NFC feature).
 bool sdReady();
-int8_t sdBackupCount();
 bool backupToSd();
 bool restoreFromSd();
-
-// A queued SD action, performed on the next boot before any radio is
-// initialised -- see the comment in nfc_cards.cpp.
-enum class SdAction : uint8_t { kNone = 0, kBackup = 1, kRestore = 2 };
-SdAction pendingAction();
-void clearAction();
-void requestAction(SdAction a);
-bool runPendingAction(char* msg, size_t msgLen);
 
 }  // namespace nfccards

@@ -120,6 +120,7 @@ void rebootAs(const uint8_t mode, const uint8_t idx, const uint32_t key = 0)
     // across an ESP32 restart, and a live 13.56 MHz field corrupts the SD
     // mount in the next feature (and starves the keyboard).
     if (nfcReady) fieldOff();
+    nfccards::flush(true);  // do not lose the last batched hit counts
     Preferences p;
     if (p.begin(kNs, false)) {
         p.putUChar("mode", mode);
@@ -185,13 +186,12 @@ void hints(const Hint* h, const int n)
 // ---------------------------------------------------------------------------
 // Reader side
 // ---------------------------------------------------------------------------
-enum class Scr : uint8_t { kMenu, kList, kScan, kRename, kConfirm };
+enum class Scr : uint8_t { kMenu, kList, kScan, kRename };
 Scr scr = Scr::kMenu;
 
 int menuSel = 0;
-char statusMsg[40] = {0};  // one-line result of the last backup / restore
-bool confirmRestore = false;
-int confirmCount    = 0;
+char statusMsg[40] = {0};  // one-line result of the last read/error
+char listNotice[32] = {0}; // warning shown instead of the list title
 int listSel = 0;
 int listTop = 0;
 
@@ -206,6 +206,10 @@ bool liveOk = false;
 int renameIdx    = -1;
 char renameBuf[24] = {0};
 int renameLen    = 0;
+int renamePos    = 0;
+bool renameCursorOn = true;
+uint32_t renameCursorMs = 0;
+bool renameFull = true;
 std::vector<char> prevWord;
 
 void drawMenu()
@@ -244,7 +248,11 @@ void drawList()
                   static_cast<unsigned>(listSel), static_cast<unsigned>(listTop));
     lcd.fillScreen(kBg);
     char title[32];
-    snprintf(title, sizeof(title), "CARD LIST  %u", static_cast<unsigned>(nfccards::count));
+    if (listNotice[0]) {
+        snprintf(title, sizeof(title), "%s", listNotice);
+    } else {
+        snprintf(title, sizeof(title), "CARD LIST  %u", static_cast<unsigned>(nfccards::count));
+    }
     header(title);
 
     if (nfccards::count == 0) {
@@ -269,8 +277,11 @@ void drawList()
         char uid[24];
         nfccards::uidToString(c, uid, sizeof(uid));
 
-        char line[32];
-        snprintf(line, sizeof(line), "%02d %s", i + 1, uid);
+        // Name first (user-editable), then the UID that the door actually sees.
+        // Ten name characters keeps the full 10-byte UID on screen without
+        // colliding with the hit counter on the right.
+        char line[40];
+        snprintf(line, sizeof(line), "%02d %-10.10s %s", i + 1, c.name, uid);
         lcd.setTextColor(fg, bg);
         lcd.drawString(line, 3, y);
 
@@ -284,7 +295,7 @@ void drawList()
         lcd.drawRightString(right, lcd.width() - 3, y);
     }
 
-    const Hint h[] = {{"ENT", "emu"}, {"B", "bind"}, {"; .", ""}, {"D", "del"}, {"esc", "back"}};
+    const Hint h[] = {{"ENT", "emu"}, {"B", "bind"}, {"N", "name"}, {"D", "del"}, {"esc", "back"}};
     hints(h, 5);
 }
 
@@ -317,6 +328,7 @@ void scanOnce()
 {
     if (!nfcReady) return;
     ++polls;
+    bool addedCard = false;
     fieldOn();
     std::vector<PICC> piccs;
     if (nfcA.detect(piccs, 120)) {
@@ -334,7 +346,9 @@ void scanOnce()
                      identified ? p.typeAsString().c_str() : "NFC-A");
             c.hits = 1;
 
-            const int8_t idx = nfccards::add(c);
+            bool isNew        = false;
+            const int8_t idx  = nfccards::add(c, &isNew);
+            if (isNew) addedCard = true;
             nfccards::uidToString(c, liveUid, sizeof(liveUid));
             snprintf(liveType, sizeof(liveType), "%s", c.type);
             liveOk = idx >= 0;
@@ -348,6 +362,9 @@ void scanOnce()
     }
     if (!piccs.empty()) nfcA.deactivate();
     fieldOff();
+    // Never write SPIFFS while the field is on.  A new card is worth an
+    // immediate commit; a hit-count bump waits for the 30 s batch (or exit).
+    nfccards::flush(addedCard);
 }
 
 void drawScan()
@@ -386,25 +403,25 @@ void drawScan()
     hints(h, 2);
 }
 
-void drawConfirm()
+void drawRenameLine()
 {
-    lcd.fillScreen(kBg);
-    header("RESTORE FROM TF");
+    char shown[26];
+    int n = 0;
+    for (int i = 0; i <= renameLen && n + 1 < static_cast<int>(sizeof(shown)); ++i) {
+        // A space when the cursor is off keeps the text from shifting left and
+        // right every blink.
+        if (i == renamePos) shown[n++] = renameCursorOn ? '_' : ' ';
+        if (i < renameLen) shown[n++] = renameBuf[i];
+    }
+    shown[n] = '\0';
 
-    char line[48];
-    snprintf(line, sizeof(line), "Restore %d card(s)?", confirmCount);
+    // Only the name line is repainted: a blinking cursor must not blank and
+    // redraw the whole panel every 500 ms.
+    lcd.fillRect(0, 42, lcd.width(), 22, kBg);
     lcd.setTextColor(kText, kBg);
     lcd.setTextSize(2);
-    lcd.drawString(line, 8, 38);
+    lcd.drawString(shown, 6, 44);
     lcd.setTextSize(1);
-
-    lcd.setTextColor(kDim, kBg);
-    lcd.drawString("This replaces the current list.", 8, 64);
-    lcd.drawString("The current list is kept as backup", 8, 76);
-    lcd.drawString("until the restore succeeds.", 8, 88);
-
-    const Hint h[] = {{"ENT", "restore"}, {"esc", "cancel"}};
-    hints(h, 2);
 }
 
 void drawRename()
@@ -414,18 +431,13 @@ void drawRename()
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("New name:", 6, 24);
 
-    lcd.setTextColor(kText, kBg);
-    lcd.setTextSize(2);
-    char shown[26];
-    snprintf(shown, sizeof(shown), "%s_", renameBuf);
-    lcd.drawString(shown, 6, 44);
-    lcd.setTextSize(1);
+    drawRenameLine();
 
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("Type on the keyboard.", 6, 78);
 
-    const Hint h[] = {{"ENT", "save"}, {"del", "erase"}, {"esc", "cancel"}};
-    hints(h, 3);
+    const Hint h[] = {{"ENT", "save"}, {", /", "cursor"}, {"del", "erase"}, {"esc", "cancel"}};
+    hints(h, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,11 +511,14 @@ enum Action : uint32_t {
     kUp     = 1u << 0,
     kDown   = 1u << 1,
     kEnter  = 1u << 2,
-    kBack   = 1u << 3,
+    kBack   = 1u << 3,   // BKSP: delete a character in the rename editor
     kScan   = 1u << 4,
     kDelete = 1u << 5,
     kName   = 1u << 6,
     kBind   = 1u << 7,
+    kCancel = 1u << 8,   // ` / ESC: leave the current page without saving
+    kLeft   = 1u << 9,
+    kRight  = 1u << 10,
 };
 
 uint32_t prevActions = 0;
@@ -516,8 +531,10 @@ uint32_t readActions()
         switch (code) {
             case ';': case 'k': case 'K': a |= kUp; break;
             case '.': case 'j': case 'J': a |= kDown; break;
-            case '`': case '~': a |= kBack; break;
-            case 0x1B: a |= kBack; break;
+            case ',': case 'h': case 'H': a |= kLeft; break;
+            case '/': case 'l': case 'L': a |= kRight; break;
+            case '`': case '~': a |= kCancel; break;
+            case 0x1B: a |= kCancel; break;
             case KEY_ENTER: a |= kEnter; break;
             case KEY_BACKSPACE: a |= kBack; break;
             case 's': case 'S': a |= kScan; break;
@@ -532,9 +549,22 @@ uint32_t readActions()
 
 void startEmulationOf(int index)
 {
-    if (index < 0 || index >= nfccards::count) return;
+    if (index < 0 || index >= nfccards::count) {
+        snprintf(listNotice, sizeof(listNotice), "CARD NOT FOUND");
+        dirty = true;
+        return;
+    }
     const nfccards::Card& c = nfccards::cards[index];
-    if (!nfccards::replayable(c)) return;
+    if (!nfccards::replayable(c)) {
+        snprintf(listNotice, sizeof(listNotice), "CARD NOT REPLAYABLE");
+        dirty = true;
+        return;
+    }
+    if (!nfcReady) {
+        snprintf(listNotice, sizeof(listNotice), "NFC OFFLINE");
+        dirty = true;
+        return;
+    }
     rebootAs(1, static_cast<uint8_t>(index), quickbind::keyForNfc(c.uid, c.len));
 }
 
@@ -558,7 +588,7 @@ void emuFail(const char* reason)
     lcd.drawString("esc: back to NFC menu", 6, 96);
     for (;;) {
         M5Cardputer.update();
-        if (readActions() & kBack) break;
+        if (readActions() & (kBack | kCancel)) break;
         delay(20);
     }
     rebootAs(0, 0);  // does not return
@@ -567,33 +597,67 @@ void emuFail(const char* reason)
 void handleKeys(uint32_t pressed)
 {
     if (scr == Scr::kRename) {
+        if (pressed & kCancel) {
+            // ESC must leave the editor, not delete a character.  BKSP keeps
+            // its usual meaning below.
+            renameBuf[0] = 0;
+            renameLen    = 0;
+            renamePos    = 0;
+            scr          = Scr::kList;
+            dirty        = true;
+            return;
+        }
+        if (pressed & kLeft) {
+            if (renamePos > 0) --renamePos;
+            dirty = true;
+        }
+        if (pressed & kRight) {
+            if (renamePos < renameLen) ++renamePos;
+            dirty = true;
+        }
+        if (pressed & kDelete) {
+            if (renamePos < renameLen) {
+                memmove(&renameBuf[renamePos], &renameBuf[renamePos + 1],
+                        static_cast<size_t>(renameLen - renamePos));
+                --renameLen;
+                renameBuf[renameLen] = 0;
+                dirty                = true;
+            }
+        }
         if (pressed & kBack) {
-            if (renameLen > 0) renameBuf[--renameLen] = 0;
+            if (renamePos > 0) {
+                memmove(&renameBuf[renamePos - 1], &renameBuf[renamePos],
+                        static_cast<size_t>(renameLen - renamePos + 1));
+                --renamePos;
+                --renameLen;
+                dirty = true;
+            }
         }
         if (pressed & kEnter) {
             if (renameLen > 0) nfccards::rename(static_cast<int8_t>(renameIdx), renameBuf);
-            scr = Scr::kList;
+            scr   = Scr::kList;
+            dirty = true;
         }
         return;
     }
 
-    if (pressed & kBack) {
+    if (pressed & (kBack | kCancel)) {
         if (scr == Scr::kMenu) {
             // Leave the NFC feature: kill the carrier first, same reason as
             // rebootAs() above, then back to the launcher's RF/NFC choice.
             if (nfcReady) fieldOff();
+            nfccards::flush(true);
             launcher::rebootInto(launcher::kAppMenu);
         }
         if (scr == Scr::kScan) scanning = false;
-        scr = (scr == Scr::kScan) ? Scr::kMenu : Scr::kMenu;
+        scr = Scr::kMenu;
         return;
     }
 
     switch (scr) {
         case Scr::kMenu:
-            if (pressed & (kUp | kDown)) {
-                menuSel = (menuSel + 1) % 2;
-            }
+            if (pressed & kUp) menuSel = (menuSel + 1) % 2;    // two items: wrap
+            if (pressed & kDown) menuSel = (menuSel + 1) % 2;  // both toggle
             if (pressed & kEnter) {
                 switch (menuSel) {
                     case 0:
@@ -605,29 +669,9 @@ void handleKeys(uint32_t pressed)
                     case 1:
                         Serial.printf("[nfc] enter list count=%u\n",
                                       static_cast<unsigned>(nfccards::count));
-                        scr = Scr::kList;
+                        listNotice[0] = 0;
+                        scr           = Scr::kList;
                         break;
-                    case 99:
-                        // Never touch the SD card while the NFC chip owns this SPI
-                        // bus: see the SdAction comment in nfc_cards.h.  Record the
-                        // request and reboot; setup() performs it before the NFC
-                        // unit is initialised.
-                        nfccards::requestAction(nfccards::SdAction::kBackup);
-                        rebootAs(0, 0);
-                        break;
-                    case 3: {
-                        const int8_t n = nfccards::sdBackupCount();
-                        if (n < 0) {
-                            snprintf(statusMsg, sizeof(statusMsg), "no TF backup");
-                        } else {
-                            // Restore is destructive and the records are not
-                            // regenerable, so it asks first and says how many.
-                            confirmRestore = true;
-                            confirmCount   = n;
-                            scr            = Scr::kConfirm;
-                        }
-                        break;
-                    }
                 }
             }
             break;
@@ -660,6 +704,10 @@ void handleKeys(uint32_t pressed)
                     renameIdx = listSel;
                     snprintf(renameBuf, sizeof(renameBuf), "%s", nfccards::cards[listSel].name);
                     renameLen = static_cast<int>(strlen(renameBuf));
+                    renamePos = renameLen;
+                    renameCursorOn = true;
+                    renameCursorMs = millis();
+                    renameFull     = true;
                     prevWord.clear();
                     scr = Scr::kRename;
                 }
@@ -670,13 +718,6 @@ void handleKeys(uint32_t pressed)
             if (pressed & kScan) {
                 scanning = !scanning;
                 if (scanning) polls = 0;
-            }
-            break;
-
-        case Scr::kConfirm:
-            if (pressed & kEnter) {
-                nfccards::requestAction(nfccards::SdAction::kRestore);
-                rebootAs(0, 0);
             }
             break;
 
@@ -735,6 +776,7 @@ void readerSetup()
 void readerLoop()
 {
     M5Cardputer.update();
+    nfccards::flush();  // batched hit counts; no-op unless dirty and 30 s elapsed
 
     if (scanning && scr == Scr::kScan) {
         static uint32_t lastScan = 0;
@@ -756,6 +798,10 @@ void readerLoop()
         const auto& word = M5Cardputer.Keyboard.keysState().word;
         for (char ch : word) {
             if (ch < 32 || ch >= 127) continue;
+            // ; , . / are the orange arrow keys, not name punctuation; ` is
+            // the esc key.  Same filter as the RF rename editor.
+            if (ch == ';' || ch == ',' || ch == '.' || ch == '/') continue;
+            if (ch == '`' || ch == '~') continue;
             bool already = false;
             for (char q : prevWord) {
                 if (q == ch) {
@@ -764,12 +810,25 @@ void readerLoop()
                 }
             }
             if (already) continue;
+            if (renamePos > renameLen) renamePos = renameLen;
             if (renameLen >= static_cast<int>(sizeof(renameBuf)) - 1) break;
-            renameBuf[renameLen++] = ch;
-            renameBuf[renameLen]   = 0;
+            memmove(&renameBuf[renamePos + 1], &renameBuf[renamePos],
+                    static_cast<size_t>(renameLen - renamePos + 1));
+            renameBuf[renamePos] = ch;
+            ++renameLen;
+            ++renamePos;
+            dirty = true;
         }
         prevWord.assign(word.begin(), word.end());
         if (!word.empty()) dirty = true;
+    }
+
+    // Blink the rename cursor at 2 Hz.  Repaint only the name line; a full-page
+    // redraw every 500 ms was visible as flicker on the small panel.
+    if (scr == Scr::kRename && millis() - renameCursorMs >= 500) {
+        renameCursorMs = millis();
+        renameCursorOn = !renameCursorOn;
+        drawRenameLine();
     }
 
     // Redraw only when something changed.  Repainting the whole panel on a timer
@@ -783,8 +842,14 @@ void readerLoop()
             case Scr::kMenu: drawMenu(); break;
             case Scr::kList: drawList(); break;
             case Scr::kScan: drawScan(); break;
-            case Scr::kRename: drawRename(); break;
-            case Scr::kConfirm: drawConfirm(); break;
+            case Scr::kRename:
+                if (renameFull) {
+                    drawRename();
+                    renameFull = false;
+                } else {
+                    drawRenameLine();
+                }
+                break;
         }
     }
 
@@ -905,7 +970,7 @@ void emulatorLoop()
             const uint32_t a       = readActions();
             const uint32_t pressed = a & ~prevActions;
             prevActions            = a;
-            if (pressed & kBack) {
+            if (pressed & (kBack | kCancel)) {
                 clearBoot();
                 rebootAs(0, 0);
             }
@@ -963,17 +1028,9 @@ void setup()
     lcd.setTextWrap(false);
     lcd.fillScreen(kBg);
 
-    // Any SD work queued by the menu happens HERE, before addSPI()/units.begin(),
-    // so the card is the only device on a mode-0 bus for the duration.
-    char sdMsg[40] = {0};
-    if (nfccards::runPendingAction(sdMsg, sizeof(sdMsg))) {
-        Serial.printf("[nfc] %s\n", sdMsg);
-        snprintf(statusMsg, sizeof(statusMsg), "%s", sdMsg);
-    }
-
-    // The deferred SD action above cut the module's power to get a clean SPI bus;
-    // the NFC chip needs it back, and loses its configuration while unpowered, so
-    // it is re-initialised from scratch below.
+    // Keep the module powered.  The old deferred-SD path used to cut POWER_EN
+    // and needed this call to bring it back; SD work now happens only in the
+    // BACKUP feature, on a boot where no radio is initialised.
     sdmount::radioPowerOn();
 
     const Boot boot = readBoot();

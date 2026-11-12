@@ -42,6 +42,7 @@ private:
         kActLeft   = 1u << 9,
         kActRight  = 1u << 10,
         kActBind   = 1u << 11,
+        kActCancel = 1u << 12,
     };
 
     uint32_t readActions();
@@ -64,8 +65,6 @@ private:
     void deleteCapture();
     void deleteSaved();
     void confirmSave();
-    void backupSignals();
-    void restoreSignals();
 
     /// What one transmit() call actually put on air, for the caller's log line.
     struct TxReport {
@@ -125,6 +124,9 @@ private:
 
     char renameBuf_[16] = {0};
     int renameLen_      = 0;
+    int renamePos_      = 0;
+    bool renameCursorOn_ = true;
+    uint32_t renameCursorMs_ = 0;
     int renameTarget_   = -1;
     std::vector<char> prevWord_;
 
@@ -133,8 +135,6 @@ private:
     bool dirty_           = true;
     bool clearArmed_      = false;
     uint32_t clearArmedAt_ = 0;
-    bool restoreArmed_    = false;
-    uint32_t restoreArmedAt_ = 0;
 
     uint32_t lastDrawMs_      = 0;
     uint32_t lastBatteryMs_   = 0;

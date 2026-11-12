@@ -35,6 +35,13 @@ constexpr int kSdCs      = 12;
 constexpr char kSdDir[]  = "/nfc";
 constexpr char kSdPath[] = "/nfc/cards.bak";
 
+// Hit counts are cosmetic and change every 400 ms while a card sits on the
+// reader, so they must not rewrite the whole SPIFFS file each time.  New cards,
+// deletes and renames still save immediately; hit-only changes are batched.
+constexpr uint32_t kFlushMs = 30000;
+bool dirty_                 = false;
+uint32_t lastFlushMs_       = 0;
+
 void uidHex(const Card& c, char* out, size_t n)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -202,14 +209,22 @@ bool save()
         lastError = "write failed";
         return false;
     }
+    bool ok = true;
     for (uint8_t i = 0; i < count; ++i) {
         char hex[24];
         uidHex(cards[i], hex, sizeof(hex));
-        f.printf("%u;%s;%04X;%02X;%u;%s\n", static_cast<unsigned>(cards[i].len), hex,
-                 static_cast<unsigned>(cards[i].atqa), static_cast<unsigned>(cards[i].sak),
-                 static_cast<unsigned>(cards[i].hits), cards[i].name);
+        if (f.printf("%u;%s;%04X;%02X;%u;%s\n", static_cast<unsigned>(cards[i].len), hex,
+                     static_cast<unsigned>(cards[i].atqa), static_cast<unsigned>(cards[i].sak),
+                     static_cast<unsigned>(cards[i].hits), cards[i].name) == 0) {
+            ok = false;
+            break;
+        }
     }
     f.close();
+    if (!ok) {
+        lastError = "write failed";
+        return false;
+    }
 
     if (SPIFFS.exists(kPath)) {
         if (SPIFFS.exists(kBak)) SPIFFS.remove(kBak);
@@ -220,12 +235,23 @@ bool save()
         return false;
     }
     if (SPIFFS.exists(kBak)) SPIFFS.remove(kBak);
-    lastError = nullptr;
+    lastError     = nullptr;
+    dirty_        = false;
+    lastFlushMs_  = millis();
     return true;
 }
 
-int8_t add(const Card& c)
+void flush(bool force)
 {
+    if (!dirty_) return;
+    if (!force && millis() - lastFlushMs_ < kFlushMs) return;
+    save();
+}
+
+int8_t add(const Card& c, bool* isNew)
+{
+    if (isNew) *isNew = false;
+
     const int8_t at = find(c.len, c.uid);
     if (at >= 0) {
         Card& e = cards[at];
@@ -233,7 +259,7 @@ int8_t add(const Card& c)
         e.atqa = c.atqa;
         e.sak  = c.sak;
         snprintf(e.type, sizeof(e.type), "%s", c.type);
-        save();
+        dirty_ = true;
         return at;
     }
     if (count >= kMaxCards) {
@@ -247,7 +273,8 @@ int8_t add(const Card& c)
     }
     const int8_t idx = static_cast<int8_t>(count);
     ++count;
-    save();
+    dirty_ = true;
+    if (isNew) *isNew = true;
     return idx;
 }
 
@@ -257,6 +284,7 @@ void remove(const int8_t i)
     for (uint8_t k = static_cast<uint8_t>(i); k + 1 < count; ++k) cards[k] = cards[k + 1];
     --count;
     memset(&cards[count], 0, sizeof(Card));
+    dirty_ = true;
     save();
 }
 
@@ -265,6 +293,7 @@ void rename(const int8_t i, const char* name)
     if (i < 0 || i >= count || name == nullptr || name[0] == 0) return;
     snprintf(cards[i].name, sizeof(cards[i].name), "%s", name);
     sanitize(cards[i].name);
+    dirty_ = true;
     save();
 }
 
@@ -287,29 +316,6 @@ bool sdReady()
     return sdmount::ensure();
 }
 
-int8_t sdBackupCount()
-{
-    if (!sdReady() || !SD.exists(kSdPath)) return -1;
-    File f = SD.open(kSdPath, FILE_READ);
-    if (!f) return -1;
-    int8_t n = 0;
-    char line[160];
-    while (f.available() > 0) {
-        size_t k = 0;
-        while (f.available() > 0 && k + 1 < sizeof(line)) {
-            const int ch = f.read();
-            if (ch < 0 || ch == '\n') break;
-            line[k++] = static_cast<char>(ch);
-        }
-        line[k] = '\0';
-        if (k == 0) continue;
-        Card probe;
-        if (parseLine(line, probe)) ++n;
-    }
-    f.close();
-    return n;
-}
-
 bool backupToSd()
 {
     if (!sdReady()) {
@@ -322,14 +328,22 @@ bool backupToSd()
         lastError = "TF write failed";
         return false;
     }
+    bool ok = true;
     for (uint8_t i = 0; i < count; ++i) {
         char hex[24];
         uidHex(cards[i], hex, sizeof(hex));
-        f.printf("%u;%s;%04X;%02X;%u;%s\n", static_cast<unsigned>(cards[i].len), hex,
-                 static_cast<unsigned>(cards[i].atqa), static_cast<unsigned>(cards[i].sak),
-                 static_cast<unsigned>(cards[i].hits), cards[i].name);
+        if (f.printf("%u;%s;%04X;%02X;%u;%s\n", static_cast<unsigned>(cards[i].len), hex,
+                     static_cast<unsigned>(cards[i].atqa), static_cast<unsigned>(cards[i].sak),
+                     static_cast<unsigned>(cards[i].hits), cards[i].name) == 0) {
+            ok = false;
+            break;
+        }
     }
     f.close();
+    if (!ok) {
+        lastError = "TF write failed";
+        return false;
+    }
     lastError = nullptr;
     Serial.printf("[nfc] backup %u card(s)\n", static_cast<unsigned>(count));
     return true;
@@ -378,77 +392,11 @@ bool restoreFromSd()
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Deferred SD actions
-//
-// The ST25R3916 runs this bus in SPI mode 1 at 10 MHz; an SD card wants mode 0.
-// Mixing them in one session latched the card hard enough that it stayed dead for
-// the rest of the power cycle, even for the RF feature.
-//
-// So an SD action is never performed while the NFC chip is up: the menu records
-// what to do in NVS and reboots, and setup() performs it before the NFC unit is
-// initialised, while the bus is still untouched.
-// ---------------------------------------------------------------------------
-namespace {
-constexpr char kActionNs[] = "nfcsd";
-}
-
-SdAction pendingAction()
-{
-    Preferences p;
-    if (!p.begin(kActionNs, true)) return SdAction::kNone;
-    const uint8_t v = p.getUChar("act", 0);
-    p.end();
-    return v <= 2 ? static_cast<SdAction>(v) : SdAction::kNone;
-}
-
-void clearAction()
-{
-    Preferences p;
-    if (!p.begin(kActionNs, false)) return;
-    p.remove("act");
-    p.end();
-}
-
-void requestAction(SdAction a)
-{
-    Preferences p;
-    if (!p.begin(kActionNs, false)) return;
-    p.putUChar("act", static_cast<uint8_t>(a));
-    p.end();
-}
-
-bool runPendingAction(char* msg, size_t msgLen)
-{
-    const SdAction a = pendingAction();
-    if (a == SdAction::kNone) return false;
-    clearAction();
-
-    if (!sdmount::ensure(true)) {
-        snprintf(msg, msgLen, "no TF card");
-        sdmount::radioPowerOn();
-        return true;
-    }
-    if (a == SdAction::kBackup) {
-        if (backupToSd()) {
-            snprintf(msg, msgLen, "backed up %u card(s)", static_cast<unsigned>(count));
-        } else {
-            snprintf(msg, msgLen, "%s", lastError ? lastError : "backup failed");
-        }
-    } else {
-        if (restoreFromSd()) {
-            snprintf(msg, msgLen, "restored %u card(s)", static_cast<unsigned>(count));
-        } else {
-            snprintf(msg, msgLen, "%s", lastError ? lastError : "restore failed");
-        }
-    }
-    SD.end();
-    return true;
-}
-
 int8_t load()
 {
-    count = 0;
+    count  = 0;
+    dirty_ = false;
+    lastFlushMs_ = millis();
     if (!SPIFFS.begin(false) && !SPIFFS.begin(true)) {
         lastError = "SPIFFS not mounted";
         return 0;

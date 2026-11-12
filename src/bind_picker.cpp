@@ -79,14 +79,16 @@ void footer(const char* extra)
     }
 }
 
-void drawSlots(int sel, const char* what)
+void drawSlots(int page, int sel, const char* what)
 {
     lcd.fillScreen(kBg);
-    header("BIND TO KEY", what);
+    char title[24];
+    snprintf(title, sizeof(title), "BIND %s", quickbind::pageName(page));
+    header(title, what);
     for (int s = 0; s < quickbind::kSlots; ++s) {
         const int gx = 24 + (s % 3) * 66;
         const int gy = 20 + (s / 3) * 31;
-        quickbind::drawSlotCell(lcd, gx, gy, 62, 29, s, s == sel);
+        quickbind::drawSlotCell(lcd, gx, gy, 62, 29, page, s, s == sel);
     }
     footer("D");
 }
@@ -135,18 +137,20 @@ bool run(uint8_t kind, uint8_t index, const char* what, uint32_t key)
     int slot  = 0;
     int icon  = 0;
     int color = 0;
+    int page  = 0;
     int step  = 0;
     uint32_t prev = 0;
 
-    // Preselect the first free slot so a first-time bind is ENTER ENTER ENTER.
+    // Preselect the first free slot on MAIN.  Switching page with a modifier
+    // keeps the slot index, so the same key is preselected on the new page.
     for (int i = 0; i < quickbind::kSlots; ++i) {
-        if (quickbind::slots[i].kind == quickbind::kNone) {
+        if (quickbind::slots[0][i].kind == quickbind::kNone) {
             slot = i;
             break;
         }
     }
 
-    if (step == 0) drawSlots(slot, what);
+    if (step == 0) drawSlots(page, slot, what);
 
     for (;;) {
         M5Cardputer.update();
@@ -154,6 +158,19 @@ bool run(uint8_t kind, uint8_t index, const char* what, uint32_t key)
         // never feeds it dies mid-edit with a panic reboot.  Harmless where no
         // watchdog is subscribed (the NFC feature), so feed it unconditionally.
         esp_task_wdt_reset();
+
+        // On the slot step, Fn / Aa / Opt choose the binding page.  This is
+        // checked before the "no new key" early-out: the modifier itself is
+        // ignored by readActs(), but it still has to redraw the page.
+        if (step == 0) {
+            const auto& ks = M5Cardputer.Keyboard.keysState();
+            const int p    = ks.fn ? 1 : (ks.shift ? 2 : (ks.opt ? 3 : 0));
+            if (p != page) {
+                page = p;
+                drawSlots(page, slot, what);
+            }
+        }
+
         const uint32_t a       = readActs();
         const uint32_t pressed = a & ~prev;
         prev                   = a;
@@ -169,13 +186,13 @@ bool run(uint8_t kind, uint8_t index, const char* what, uint32_t key)
             if (pressed & kRight) slot = (slot + 1) % quickbind::kSlots;
             if (pressed & kUp) slot = (slot + quickbind::kSlots - 3) % quickbind::kSlots;
             if (pressed & kDown) slot = (slot + 3) % quickbind::kSlots;
-            if (pressed & kDel) quickbind::clear(slot);
+            if (pressed & kDel) quickbind::clear(page, slot);
             if (pressed & kEnter) {
                 step = 1;
                 drawIcons(icon, what);
                 continue;
             }
-            drawSlots(slot, what);
+            drawSlots(page, slot, what);
         } else if (step == 1) {
             if (pressed & kLeft) icon = (icon + kIconCount - 1) % kIconCount;
             if (pressed & kRight) icon = (icon + 1) % kIconCount;
@@ -191,12 +208,12 @@ bool run(uint8_t kind, uint8_t index, const char* what, uint32_t key)
             if (pressed & kLeft) color = (color + quickbind::kColorCount - 1) % quickbind::kColorCount;
             if (pressed & kRight) color = (color + 1) % quickbind::kColorCount;
             if (pressed & kEnter) {
-                quickbind::set(slot, kind, index, static_cast<uint8_t>(icon),
+                quickbind::set(page, slot, kind, index, static_cast<uint8_t>(icon),
                                static_cast<uint8_t>(color), key);
-                Serial.printf("[bind] slot=%s kind=%u index=%u icon=%d color=%d key=%08lX\n",
-                              quickbind::keyLegend(slot), static_cast<unsigned>(kind),
-                              static_cast<unsigned>(index), icon, color,
-                              static_cast<unsigned long>(key));
+                Serial.printf("[bind] page=%s slot=%s kind=%u index=%u icon=%d color=%d key=%08lX\n",
+                              quickbind::pageName(page), quickbind::keyLegend(slot),
+                              static_cast<unsigned>(kind), static_cast<unsigned>(index), icon,
+                              color, static_cast<unsigned long>(key));
                 return true;
             }
             drawColors(color, what);

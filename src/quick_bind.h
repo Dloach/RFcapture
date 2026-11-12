@@ -13,6 +13,9 @@ namespace quickbind {
 
 enum Kind : uint8_t { kNone = 0, kRf = 1, kNfc = 2 };
 constexpr int kSlots = 9;
+// Page 0 is the unmodified grid.  Holding Fn / Aa / Opt shows pages 1 / 2 / 3,
+// so a binding is addressed as (page, slot) and the 3x3 grid is multiplied by 4.
+constexpr int kPages = 4;
 
 struct Binding {
     uint8_t kind   = kNone;
@@ -27,7 +30,7 @@ struct Binding {
     uint32_t key   = 0;
 };
 
-extern Binding slots[kSlots];
+extern Binding slots[kPages][kSlots];
 
 // ---------------------------------------------------------------------------
 // Stable binding keys.  Pure functions so the host tests can exercise them.
@@ -81,8 +84,12 @@ constexpr int kColorCount = 8;
 
 void load();
 bool save();
-void clear(int slot);
-void set(int slot, uint8_t kind, uint8_t index, uint8_t icon, uint8_t color, uint32_t key = 0);
+void clear(int page, int slot);
+void set(int page, int slot, uint8_t kind, uint8_t index, uint8_t icon, uint8_t color,
+         uint32_t key = 0);
+
+// Display name of a grid page ("MAIN", "FN", "AA", "OPT").
+const char* pageName(int page);
 
 // Slot index for a keyboard code, or -1.  Letters match both cases.
 int slotFor(uint8_t code);
@@ -93,9 +100,9 @@ const char* keyLegend(int slot);
 // One grid cell: key legend in the corner, the bound icon centred.  Drawn by
 // the launcher home and by the bind picker's slot step.
 template <typename G>
-inline void drawSlotCell(G& g, int x, int y, int w, int h, int slot, bool selected)
+inline void drawSlotCell(G& g, int x, int y, int w, int h, int page, int slot, bool selected)
 {
-    const Binding& b = slots[slot];
+    const Binding& b = slots[page][slot];
     if (selected) g.fillRect(x, y, w, h, 0x2104);
     g.drawRect(x, y, w, h, selected ? 0xFD20 : 0x4208);
     g.setTextSize(1);

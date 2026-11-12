@@ -11,7 +11,6 @@
 #include "quick_bind.h"
 #include "rf_replay.h"
 #include "trace.h"
-#include "tf_backup.h"
 
 namespace {
 
@@ -197,6 +196,11 @@ void App::update()
 
     if (mode_ == Mode::kRename) {
         handleRenameInput();
+        if (mode_ == Mode::kRename && millis() - renameCursorMs_ >= 500) {
+            renameCursorMs_ = millis();
+            renameCursorOn_ = !renameCursorOn_;
+            dirty_          = true;
+        }
     } else {
         actions_ = readActions();
         const uint32_t pressed = actions_ & ~prevActions_;
@@ -371,10 +375,6 @@ void App::update()
         clearArmed_ = false;
         dirty_      = true;
     }
-    if (restoreArmed_ && now - restoreArmedAt_ > 4000) {
-        restoreArmed_ = false;
-        dirty_        = true;
-    }
 
     if (dirty_ && now - lastDrawMs_ >= 33) {
         render();
@@ -434,8 +434,8 @@ uint32_t App::readActions()
             case '/': a |= kActRight; break;
             // The key in the top left corner is labelled "esc" - it reports a
             // backtick, so treat it as ESC directly (no Fn needed).
-            case '`': case '~': a |= kActBack; break;
-            case 0x1B: a |= kActBack; break;  // in case a future map reports ESC
+            case '`': case '~': a |= kActCancel; break;
+            case 0x1B: a |= kActCancel; break;  // in case a future map reports ESC
             case 's': case 'S': a |= kActSend; break;
             case 'f': case 'F': a |= kActBand; break;
             case 'd': case 'D': a |= kActDelete; break;
@@ -458,7 +458,7 @@ void App::handleAction(uint32_t action)
         // up/down are accepted as well for convenience.
         if (action & (kActUp | kActLeft)) confirmYes_ = true;
         if (action & (kActDown | kActRight)) confirmYes_ = false;
-        if (action & kActBack) {
+        if (action & (kActBack | kActCancel)) {
             mode_  = Mode::kBrowse;
             dirty_ = true;
         }
@@ -483,7 +483,7 @@ void App::handleAction(uint32_t action)
         // Leaving the RF feature returns to the launcher's RF/NFC chooser.  The
         // two features need incompatible chip configurations, so this is a reboot
         // rather than a mode switch (see launcher.h).
-        if (action & kActBack) {
+        if (action & (kActBack | kActCancel)) {
             launcher::rebootInto(launcher::kAppMenu);
         }
         if (action & kActUp) {
@@ -519,7 +519,7 @@ void App::handleAction(uint32_t action)
         return;
     }
 
-    if (action & kActBack) {
+    if (action & (kActBack | kActCancel)) {
         if (screen_ == Screen::kScan) exitScan();
         screen_ = Screen::kHome;
         dirty_  = true;
@@ -620,6 +620,9 @@ void App::handleAction(uint32_t action)
                 renameTarget_ = sendSel_;
                 snprintf(renameBuf_, sizeof(renameBuf_), "%s", saved_.at(sendSel_).name);
                 renameLen_ = static_cast<int>(strlen(renameBuf_));
+                renamePos_ = renameLen_;
+                renameCursorOn_ = true;
+                renameCursorMs_ = millis();
                 prevWord_.clear();
                 dirty_ = true;
             }
@@ -645,10 +648,14 @@ void App::handleRenameInput()
             }
         }
         if (already) continue;
+        if (renamePos_ > renameLen_) renamePos_ = renameLen_;
         if (renameLen_ >= static_cast<int>(sizeof(renameBuf_)) - 1) break;
-        renameBuf_[renameLen_++] = c;
-        renameBuf_[renameLen_]   = 0;
-        dirty_                   = true;
+        memmove(&renameBuf_[renamePos_ + 1], &renameBuf_[renamePos_],
+                static_cast<size_t>(renameLen_ - renamePos_ + 1));
+        renameBuf_[renamePos_] = c;
+        ++renameLen_;
+        ++renamePos_;
+        dirty_ = true;
     }
     prevWord_.assign(word.begin(), word.end());
 
@@ -656,10 +663,35 @@ void App::handleRenameInput()
     const uint32_t pressed = a & ~prevActions_;
     prevActions_           = a;
 
-    if (pressed & kActBack) {  // backspace = delete a character
-        if (renameLen_ > 0) {
-            renameBuf_[--renameLen_] = 0;
-            dirty_                   = true;
+    if (pressed & kActCancel) {  // ESC leaves without saving
+        mode_  = Mode::kBrowse;
+        dirty_ = true;
+        return;
+    }
+    if (pressed & kActLeft) {
+        if (renamePos_ > 0) --renamePos_;
+        dirty_ = true;
+    }
+    if (pressed & kActRight) {
+        if (renamePos_ < renameLen_) ++renamePos_;
+        dirty_ = true;
+    }
+    if (pressed & kActDelete) {  // D: delete at the cursor
+        if (renamePos_ < renameLen_) {
+            memmove(&renameBuf_[renamePos_], &renameBuf_[renamePos_ + 1],
+                    static_cast<size_t>(renameLen_ - renamePos_));
+            --renameLen_;
+            renameBuf_[renameLen_] = 0;
+            dirty_                 = true;
+        }
+    }
+    if (pressed & kActBack) {  // backspace = delete the character before the cursor
+        if (renamePos_ > 0) {
+            memmove(&renameBuf_[renamePos_ - 1], &renameBuf_[renamePos_],
+                    static_cast<size_t>(renameLen_ - renamePos_ + 1));
+            --renamePos_;
+            --renameLen_;
+            dirty_ = true;
         }
     }
     if (pressed & kActEnter) {
@@ -904,88 +936,6 @@ void App::confirmSave()
             toast("SAVE LIST FULL");
             break;
     }
-}
-
-void App::backupSignals()
-{
-    if (saved_.empty()) {
-        toast("NOTHING TO BACKUP");
-        return;
-    }
-
-    // Card access blocks for a few hundred milliseconds; pause the receiver so
-    // its edge ring buffer does not overflow meanwhile.
-    rx_.suspend();
-    int count              = 0;
-    const TfResult result  = tfbackup::saveSignals(saved_, &count);
-    rx_.resume();
-    prevActions_ = readActions();
-
-    char buf[28];
-    switch (result) {
-        case TfResult::kOk:
-            snprintf(buf, sizeof(buf), "BACKED UP %d", count);
-            break;
-        case TfResult::kNoCard:
-            snprintf(buf, sizeof(buf), "NO TF CARD");
-            break;
-        default:
-            snprintf(buf, sizeof(buf), "TF WRITE FAILED");
-            break;
-    }
-    Serial.printf("[tf] backup result=%d n=%d\n", static_cast<int>(result), count);
-    toast(buf);
-    dirty_ = true;
-}
-
-void App::restoreSignals()
-{
-    const uint32_t now = millis();
-    if (!restoreArmed_ || now - restoreArmedAt_ > 4000) {
-        restoreArmed_   = true;
-        restoreArmedAt_ = now;
-        toast("ENTER AGAIN TO RESTORE");
-        dirty_ = true;
-        return;
-    }
-    restoreArmed_ = false;
-
-    rx_.suspend();
-    int count             = 0;
-    const TfResult result = tfbackup::loadSignals(saved_, &count);
-    rx_.resume();
-    prevActions_ = readActions();
-
-    sendSel_    = 0;
-    sendScroll_ = 0;
-
-    char buf[28];
-    switch (result) {
-        case TfResult::kOk:
-            snprintf(buf, sizeof(buf), "RESTORED %d", count);
-            break;
-        case TfResult::kPartial:
-            snprintf(buf, sizeof(buf), "RESTORED %d, SKIPPED", count);
-            break;
-        case TfResult::kNoCard:
-            snprintf(buf, sizeof(buf), "NO TF CARD");
-            break;
-        case TfResult::kNoFile:
-            snprintf(buf, sizeof(buf), "NO BACKUP FILE");
-            break;
-        case TfResult::kEmpty:
-            snprintf(buf, sizeof(buf), "BACKUP EMPTY");
-            break;
-        case TfResult::kBadFile:
-            snprintf(buf, sizeof(buf), "BAD BACKUP FILE");
-            break;
-        default:
-            snprintf(buf, sizeof(buf), "TF READ FAILED");
-            break;
-    }
-    Serial.printf("[tf] restore result=%d n=%d\n", static_cast<int>(result), count);
-    toast(buf);
-    dirty_ = true;
 }
 
 void App::toast(const char* text)
@@ -1347,11 +1297,18 @@ void App::renderRename()
 
     canvas_.setTextColor(kColText, kColBox);
     char buf[32];
-    snprintf(buf, sizeof(buf), "%s_", renameBuf_);
+    int n = 0;
+    for (int i = 0; i <= renameLen_ && n + 1 < static_cast<int>(sizeof(buf)); ++i) {
+        // A space when the cursor is off keeps the text from shifting on every
+        // blink; the old end-of-name underscore look is preserved.
+        if (i == renamePos_) buf[n++] = renameCursorOn_ ? '_' : ' ';
+        if (i < renameLen_) buf[n++] = renameBuf_[i];
+    }
+    buf[n] = '\0';
     canvas_.drawString(buf, x + 8, y + 22);
 
     canvas_.setTextColor(kColDim, kColBox);
-    canvas_.drawString("ENTER ok   DEL delete", x + 8, y + 38);
+    canvas_.drawString("ENTER ok  , / cursor  DEL erase", x + 8, y + 38);
 }
 
 // How many times the stored train has to be repeated to stay on air for

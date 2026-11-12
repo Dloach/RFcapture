@@ -131,16 +131,16 @@ void draw()
     char line[48];
     lcd.setTextColor(kDim, kBg);
     snprintf(line, sizeof(line), "RF signals: %u", static_cast<unsigned>(saved_.size()));
-    lcd.drawString(line, 6, 82);
+    lcd.drawString(line, 6, 76);
     snprintf(line, sizeof(line), "NFC cards : %u", static_cast<unsigned>(nfccards::count));
-    lcd.drawString(line, 6, 94);
+    lcd.drawString(line, 6, 88);
 
     lcd.setTextColor(sdOk ? kOk : kWarn, kBg);
-    lcd.drawString(sdOk ? "TF card ready" : "no TF card", 6, 106);
+    lcd.drawString(sdOk ? "TF card ready" : "no TF card", 6, 100);
 
     if (statusMsg[0]) {
         lcd.setTextColor(kAccent, kBg);
-        lcd.drawString(statusMsg, 6, 106);
+        lcd.drawString(statusMsg, 6, 108);
         lcd.setTextColor(sdOk ? kOk : kWarn, kBg);
     }
 
@@ -161,10 +161,16 @@ bool copyFile(fs::FS& from, const char* src, fs::FS& dst, const char* dstPath)
     }
     uint8_t buf[128];
     int n;
-    while ((n = in.read(buf, sizeof(buf))) > 0) out.write(buf, static_cast<size_t>(n));
+    bool ok = true;
+    while ((n = in.read(buf, sizeof(buf))) > 0) {
+        if (out.write(buf, static_cast<size_t>(n)) != static_cast<size_t>(n)) {
+            ok = false;
+            break;
+        }
+    }
     in.close();
     out.close();
-    return true;
+    return ok;
 }
 
 void doBackup()
@@ -255,10 +261,10 @@ void loop()
     for (const auto& pos : M5Cardputer.Keyboard.keyList()) {
         const uint8_t code = static_cast<uint8_t>(M5Cardputer.Keyboard.getKeyValue(pos).value_first);
         switch (code) {
-            case ';': case 'k': case 'K':
-            case '.': case 'j': case 'J': a |= 1u << 0; break;
-            case KEY_ENTER: a |= 1u << 1; break;
-            case '`': case '~': case 0x1B: case KEY_BACKSPACE: a |= 1u << 2; break;
+            case ';': case 'k': case 'K': a |= 1u << 0; break;  // up
+            case '.': case 'j': case 'J': a |= 1u << 1; break;  // down
+            case KEY_ENTER: a |= 1u << 2; break;
+            case '`': case '~': case 0x1B: case KEY_BACKSPACE: a |= 1u << 3; break;
             default: break;
         }
     }
@@ -266,7 +272,7 @@ void loop()
     const uint32_t pressed = a & ~prev;
     prev                   = a;
 
-    if (pressed & (1u << 2)) {  // esc
+    if (pressed & (1u << 3)) {  // esc
         if (confirmRestore) {
             confirmRestore = false;
             dirty          = true;
@@ -275,10 +281,14 @@ void loop()
         }
     }
     if (pressed & (1u << 0)) {
-        sel   = (sel + 1) % 2;
+        sel   = (sel + 1) % 2;  // two items: either direction toggles
         dirty = true;
     }
     if (pressed & (1u << 1)) {
+        sel   = (sel + 1) % 2;
+        dirty = true;
+    }
+    if (pressed & (1u << 2)) {
         if (confirmRestore) {
             doRestore();
         } else if (sel == 0) {

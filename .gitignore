@@ -17,9 +17,12 @@ tests/host/test_decoder
 docs/signals-*.log
 *.local.log
 
-# Serial captures from debug sessions (cap-serial.py output).
+# Serial captures from debug sessions (cap-serial.py output) and temporary
+# upload transcripts.
 docs/cap-*.log
+docs/upload-*.log
 
 # Standalone reference project used during NFC bring-up (superseded by the
-# unified firmware's NFC TOOLS); kept on disk, not in git.
-retry/
+# unified firmware's NFC TOOLS).  Its source is tracked on purpose: it is the
+# compact, verified record of the old emulation path; its .pio/ build tree is
+# already covered by the global rule above.

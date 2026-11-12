@@ -3,13 +3,20 @@
 在 M5Stack Cardputer ADV 上，用 CAP.CC1101 模块采集、永久保存并重发铁门 / 卷帘门 /
 道闸等 OOK 遥控器的信号。
 
+> **2026-11-12 更新（先读）**：主线已是 **launcher 三功能（RF TOOLS / NFC TOOLS / BACKUP）
+> + 九宫格快捷区**。RF TOOLS 内部的首页只有 **CAPTURE / SEND / SCAN RF** 三项；
+> TF 备份/恢复已升为顶层 **BACKUP**，并同时备份 NFC 卡库和九宫格绑定。
+> 本文 3.x 里仍把 BACKUP 当作 RF 首页项的描述属于旧版；以根目录 `README.md` 和
+> `docs/DEV-STATE.md` §0 为准。
+
 - **采集**：CC1101 异步 OOK 模式，GDO0 输出解调信号 → GPIO 中断 + `micros()` 时间戳记录脉宽
 - **解码**：EV1527（24 bit）/ PT2262（12 位三态）
 - **永久保存**：采集页选中后按 `Enter` 弹窗确认，存进 NVS（掉电不丢，可改名）
 - **回放**：发送页选中后按 `S` 即按原始波形重发（软件生成基带，无需额外发射模块）
 - **备份**：永久信号可一键写入 TF 卡的文本文件，换机 / 刷机后一键恢复
 - **频段**：315 / 433 / 868 MHz 可切换，发送时自动切到该记录所属频段
-- **界面**：横向 240×135，首页四项菜单：采集 / 发送 / 备份 TF / 恢复 TF，支持键盘改名
+- **界面**：横向 240×135；顶层 launcher 三功能 + 右侧九宫格，RF TOOLS 首页三项：
+  采集 / 发送 / SCAN RF；支持键盘改名
 
 > 已在实物上验证：EV1527 遥控器（315 MHz，T≈500 µs）采集、保存、回放均可让铁门动作。
 > **本文所有码值（`123456` / `654321` 等）都是占位示例，不是任何真实设备的码值。**
@@ -155,17 +162,16 @@ macOS / Linux 上直接：
 > 删除时特别容易出事，所以 2026-11-08 改成了现在这样。
 > 改名输入框里 `; , . /` 和 `` ` `` 都不当字符收，`Backspace` 删字符、`Enter` 确认。
 
-开机进入**首页**（五项菜单，↑/↓ 选择，`Enter` 进入）：
+开机进入 **launcher**（RF TOOLS / NFC TOOLS / BACKUP，↑/↓ 选择，`Enter` 进入）；
+进 RF TOOLS 后是三项：
 
 ```text
-RF CAPTURE                  87%
-   > CAPTURE
-     SEND
-     SCAN RF
-     BACKUP TF
-     RESTORE TF
-ENTER open
+CAPTURE
+SEND
+SCAN RF
 ```
+
+右侧九宫格 `8 9 0 / I O P / J K L` 是快捷动作，在 launcher 上直接按。
 
 CC1101 没接或没识别到时，标题栏会显示 `NO RADIO`（橙色）而不是页面标题，
 此时 `CAPTURE` / `SEND` / `SCAN RF` 三项按 `Enter` 只会提示 `NO RADIO`，
@@ -284,20 +290,27 @@ best 433.92 -71dBm  ENT use
 > 扫描期间接收中断被摘掉（`rx_.suspend()`，否则每次跳频都会往环形缓冲里灌一堆噪声），
 > 所以这时候采集页不会收东西；退出扫描会自动恢复。
 
-### 3.4 TF 卡备份 / 恢复
+### 3.4 TF 卡备份 / 恢复（顶层 BACKUP）
 
-首页选中 `BACKUP TF` 按 `Enter`：把当前最多 8 条永久信号写到 TF 卡。
-选中 `RESTORE TF` **4 秒内连按两次 `Enter`** 才会真正恢复（第一次只提示 `ENTER AGAIN TO RESTORE`），防止误触覆盖。
+launcher 进 **BACKUP**，选 `BACKUP TO TF` 按 `Enter`：把当前最多 8 条永久信号、
+NFC 卡库、九宫格绑定写到 TF 卡。`RESTORE FROM TF` 先显示确认页，
+再按一次 `Enter` 才真正恢复（防止误触覆盖）。
 
-- 备份成功：底部提示 `BACKED UP n`；没有记录时提示 `NOTHING TO BACKUP`
-- 恢复成功：底部提示 `RESTORED n`；个别记录损坏时提示 `RESTORED n, SKIPPED`
+- 备份成功：状态行 `RF n ok|NFC n ok|Q ok`；没有记录时提示 `NOTHING TO BACKUP`
+- 恢复成功：状态行同上；个别记录损坏时 RF 会提示 `RESTORED n, SKIPPED`
 - 失败提示：`NO TF CARD` / `NO BACKUP FILE` / `BAD BACKUP FILE` / `BACKUP EMPTY`
 
 文件路径与格式（UTF-8 纯文本，可以直接在电脑上查看 / 编辑名字）：
 
 ```text
-/cardputer/signals.txt
+/cardputer/signals.txt    RF 永久信号
+/nfc/cards.bak            NFC 卡库
+/quick.txt                九宫格绑定
+```
 
+`/cardputer/signals.txt` 的内容格式：
+
+```text
 CardputerSig 1
 S 315 24 1 123456 501 160 Gate1
 P 350 1050 350 1050 350 350 ...（共 160 个脉宽，单位 µs）
@@ -318,10 +331,25 @@ P 350 1050 ...
 | --- | --- | --- |
 | 采集列表（自动） | NVS `rfcap` | 最多 16 条，掉电不丢；`C` 两次可清空 |
 | 永久保存（手动） | NVS `rfsave` | 最多 8 条，带名字，只有按 `Enter` 保存才进入 |
-| TF 备份文件 | `/cardputer/signals.txt` | 手动备份的永久信号；换机 / 刷机后可恢复 |
-| 重刷固件 | — | 两份数据都不受影响；只有 `erase_flash` 或改分区表才会清掉 |
+| NFC 卡库 | SPIFFS `/nfc/retry.txt` | 最多 16 张；`CARD LIST` 里删除 / 改名 |
+| 九宫格绑定 | SPIFFS `/quick.txt` | 6 字段：slot/kind/index/icon/color/key |
+| TF 备份文件 | `/cardputer/signals.txt`、`/nfc/cards.bak`、`/quick.txt` | BACKUP 一次写三份 |
+| 重刷固件 | — | 两份 NVS 数据都不受影响；只有 `erase_flash` 或改分区表才会清掉 |
 
 发送时会自动切到该记录所属的频段。
+
+### 3.6 NFC TOOLS
+
+launcher 进 **NFC TOOLS**，两个入口：
+
+- `READ CARDS`：`S` 开始/停止扫描，卡贴到模块背面，读到后自动入库（UID / ATQA / SAK / 类型）；
+- `CARD LIST`：`;` / `.` 选卡，`ENTER` 重启进入模拟，`B` 绑定九宫格，
+  `D` 删除，`N` 改名，`` ` `` 返回。
+
+模拟必须先选 `cfg.emulation` 再 `Units.begin()`，所以每次进入模拟都是一次重启。
+会话期间不能打印、不能整屏重绘、尽量不碰 I2C；配方和踩坑见
+`docs/DEV-STATE.md` §14.2 / §7.1。NFC 卡库在 SPIFFS `/nfc/retry.txt`，
+BACKUP 会写 `/nfc/cards.bak`。
 
 ---
 
@@ -350,15 +378,22 @@ EV1527 一帧 24 位（20 位地址 + 4 位按键），连续发 8–15 遍；�
 
 ```text
 src/
-├── main.cpp          入口
-├── app.*             首页 / 采集页 / 发送页 / SCAN RF、保存确认、改名、transmit()
+├── main.cpp          入口，分发 RF / NFC / BACKUP / launcher
+├── launcher.*        launcher 三功能 + 九宫格
+├── app.*             RF 首页 / 采集页 / 发送页 / SCAN RF
+├── nfc_app.*         NFC 读卡 / 列表 / 模拟
+├── nfc_cards.*       NFC 卡库（SPIFFS + TF 备份）
+├── backup_app.*      BACKUP / RESTORE
+├── bind_picker.*     九宫格绑定选择器
+├── quick_bind.*      九宫格绑定表（/quick.txt）
 ├── cc1101.*          CC1101 驱动（SPI、频段、收发模式、PATABLE、RSSI）
 ├── ook_rx.*          GPIO 中断采集脉冲 + 成帧
 ├── ook_decoder.*     EV1527 / PT2262 解码 + 波形质量分（estimateBaseUs / scoreWaveform）
 ├── ook_tx.*          基带发送：RMT 硬件时序，位翻转作为 fallback
 ├── capture_store.*   采集列表（NVS rfcap，自动保存）
 ├── saved_store.*     永久保存列表（NVS rfsave，带名字）
-├── tf_backup.*       TF 卡备份 / 恢复（纯文本，共享 SPI）
+├── tf_backup.*       RF 信号的 TF 备份 / 恢复（纯文本，共享 SPI）
+├── sd_mount.h        共享 SD 挂载
 ├── polling_keyboard.h TCA8418 轮询键盘（替换库自带的中断读取）
 ├── trace.*           最近 8 帧存 RTC 内存，panic 重启后打印
 ├── rf_frame.h        脉冲/帧结构
@@ -398,7 +433,7 @@ src/
 | 开机瞬间串口刷屏 | CC1101 未配置时 GDO0 默认输出时钟，被接收端当成无数个边沿 | 先配置芯片再启动接收。历史上持续刷的 `RX buffer too small` 是 RMT 驱动 ISR 里打的日志，`esp_log_level_set` 按 tag 压不住；接收改成 GPIO 中断后已不再出现 |
 | 可收可发，但键盘用几秒 / 按几下就失灵（心跳日志还在打，主循环活着） | M5Cardputer ADV 的键盘读取靠 TCA8418 `/INT` 边沿：漏一次边沿或未用矩阵引脚触发 GPIO 中断后 INT 被拉低锁死，10 级按键 FIFO 填满，主循环仍在跑但再也收不到键 | 用 `src/polling_keyboard.h` 的 `PollingKeyboardReader` 替换库自带的中断读取：每轮主循环直接读 TCA8418 FIFO，并关掉 GPIO 中断（`CFG` 只留 `KE_IEN`）。替换前先 `detachInterrupt(RF_KBD_INT)`，否则销毁默认读取器会在 GPIO 11 上留下悬空的 ISR |
 | 同一个按钮两次采集，码值一样，一次能开闸一次不能 | store 只存脉宽、电平靠下标奇偶推；`onEdge()` 原来盲翻 `level_`，漏一个边沿之后整段电平标签反过来，回放发出去的是补码 | `onEdge()` 改成 `readPin()` 直接读 GPIO 寄存器拿真实电平（`IRAM_ATTR`，NVS 提交关 flash cache 期间也安全）。这类坏记录现在会显示成低 `q` 分，见 §3.1 |
-| 换机 / 重刷后永久信号没了 | 永久信号只存在 NVS `rfsave` 里 | 首页 `BACKUP TF` 生成 `/cardputer/signals.txt`，新机器上 `RESTORE TF` 恢复 |
+| 换机 / 重刷后永久信号没了 | 永久信号只存在 NVS `rfsave` 里 | launcher 进 `BACKUP` 生成 `/cardputer/signals.txt`，新机器上 `RESTORE FROM TF` 恢复 |
 | 插 TF 卡后射频偶发丢帧 | TF 卡座与 CC1101 共用 SCK/MOSI/MISO，长时间挂载会抢 SPI | 只在备份 / 恢复瞬间 `SD.begin()`，结束后立刻 `SD.end()`；操作期间暂停接收 |
 | 换了台电脑编译报 `rmt_set_pin was not declared` | `platform = espressif32` 没锁版本，新机器拉到 8.0.0（Arduino core 3.x / IDF 5.x），legacy RMT 已移除 `rmt_set_pin` | 改用 `rmt_set_gpio(..., false)`（IDF 4.4 也提供该 API） |
 | 烧录后黑屏、串口无限重启：`rmt(legacy): CONFLICT! driver_ng is not allowed to be used with the legacy driver` + `abort()` | core 3.x / IDF 5.x 下 M5Unified 的 `LedBus_RMT`（板载 RGB LED）先占用新 RMT 驱动，与 `ook_rx.cpp` 的 legacy RMT 冲突，开机约 200ms 即 abort | `platformio.ini` 锁 `espressif32@6.13.0`（IDF 4.4 只有 legacy RMT；与官方推荐的 6.7.0 同线）。**不要升 8.x**。崩溃固件会让 esptool 抓不到下载窗口，需侧面开关 OFF→按住 G0→上电→松 G0 手动进下载模式救砖 |

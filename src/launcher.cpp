@@ -30,9 +30,22 @@ constexpr uint16_t kWarn   = 0xF800;
 auto& lcd = M5Cardputer.Display;
 
 int sel = 0;
+int gridPage = 0;  // 0 = main, 1 = Fn, 2 = Aa/Shift, 3 = Opt
 bool dirty = true;
 
 char status[32] = {0};  // one-line result of the last quick action
+
+// Which grid page the modifier keys currently select.  Holding Fn/Aa/Opt shows
+// that page; releasing returns to MAIN.  Priority is Fn > Aa > Opt so a stuck
+// modifier cannot hide the others.
+int pageFromModifiers()
+{
+    const auto& ks = M5Cardputer.Keyboard.keysState();
+    if (ks.fn) return 1;
+    if (ks.shift) return 2;
+    if (ks.opt) return 3;
+    return 0;
+}
 
 // ---------------------------------------------------------------------------
 // RF quick send, straight from the home page -- no reboot.
@@ -51,8 +64,10 @@ bool txReady = false;
 void rfSetupIfBound()
 {
     bool need = false;
-    for (int i = 0; i < quickbind::kSlots; ++i) {
-        if (quickbind::slots[i].kind == quickbind::kRf) need = true;
+    for (int page = 0; page < quickbind::kPages; ++page) {
+        for (int i = 0; i < quickbind::kSlots; ++i) {
+            if (quickbind::slots[page][i].kind == quickbind::kRf) need = true;
+        }
     }
     if (!need) return;
 
@@ -145,6 +160,8 @@ void draw()
     lcd.fillRect(0, 0, lcd.width(), 13, kHead);
     lcd.setTextColor(kText, kHead);
     lcd.drawString("CARDPUTER", 3, 2);
+    lcd.setTextColor(kAccent, kHead);
+    lcd.drawString(quickbind::pageName(gridPage), 80, 2);
 
     const int level = M5.Power.getBatteryLevel();
     char bat[12];
@@ -170,12 +187,12 @@ void draw()
         lcd.drawString(status, 4, 106);
     }
 
-    // Right: the 3x3 quick-bind grid (8 9 0 / I O P / J K L).
+    // Right: the 3x3 quick-bind grid for the current modifier page.
     lcd.drawFastVLine(118, 16, 98, kDim);
     for (int s = 0; s < quickbind::kSlots; ++s) {
         const int gx = 124 + (s % 3) * 38;
         const int gy = 16 + (s / 3) * 33;
-        quickbind::drawSlotCell(lcd, gx, gy, 36, 31, s, false);
+        quickbind::drawSlotCell(lcd, gx, gy, 36, 31, gridPage, s, false);
     }
 
     lcd.drawFastHLine(0, 118, lcd.width(), kDim);
@@ -186,8 +203,52 @@ void draw()
     lcd.drawString("ENT", 62, 122);
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("open", 84, 122);
-    lcd.setTextColor(kDim, kBg);
-    lcd.drawString("grid keys: one-key action", 130, 122);
+}
+
+// ---------------------------------------------------------------------------
+// Reboot splash
+//
+// The LCD keeps its framebuffer across an MCU reset, so this screen stays
+// visible until the next feature draws its first frame.  It used to be a line
+// of text ("ENTERING ... / restarting...") that vanished before anyone could
+// read it; a filling bar communicates the same thing in one glance and gives
+// the ~2 s feature bring-up a visual anchor.
+// ---------------------------------------------------------------------------
+constexpr int kBootBarX = 24;
+constexpr int kBootBarY = 86;
+constexpr int kBootBarW = 192;
+constexpr int kBootBarH = 14;
+
+const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP"};
+
+void drawBootBase(App app)
+{
+    lcd.fillScreen(kBg);
+    lcd.fillRect(0, 0, lcd.width(), 13, kHead);
+    lcd.setTextColor(kText, kHead);
+    lcd.drawString("CARDPUTER", 3, 2);
+
+    const char* name = kBootName[app <= kAppBackup ? app : 0];
+    lcd.setTextSize(2);
+    lcd.setTextColor(kAccent, kBg);
+    lcd.drawString(name, (lcd.width() - lcd.textWidth(name)) / 2, 52);
+    lcd.setTextSize(1);
+
+    // Frame; the interior is repainted by drawBootProgress().
+    lcd.drawRect(kBootBarX, kBootBarY, kBootBarW, kBootBarH, kDim);
+    lcd.fillRect(kBootBarX + 1, kBootBarY + 1, kBootBarW - 2, kBootBarH - 2, kBg);
+}
+
+void drawBootProgress(int percent)
+{
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    const int innerW = kBootBarW - 2;
+    const int fill   = innerW * percent / 100;
+    lcd.fillRect(kBootBarX + 1, kBootBarY + 1, innerW, kBootBarH - 2, kBg);
+    if (fill > 0) {
+        lcd.fillRect(kBootBarX + 1, kBootBarY + 1, fill, kBootBarH - 2, kOk);
+    }
 }
 
 }  // namespace
@@ -220,25 +281,19 @@ void rebootInto(App app)
     }
 
     // The LCD keeps its framebuffer across an MCU reset, so this splash stays
-    // on screen until the next feature draws its first frame.  Without it the
-    // display re-initialisation reads as a ~2 s black screen.
-    static const char* const kName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP"};
-    lcd.fillScreen(kBg);
-    lcd.fillRect(0, 0, lcd.width(), 13, kHead);
-    lcd.setTextColor(kText, kHead);
-    lcd.drawString("CARDPUTER", 3, 2);
-    lcd.setTextSize(2);
-    lcd.setTextColor(kAccent, kBg);
-    char line[24];
-    snprintf(line, sizeof(line), "ENTERING %s", kName[app <= kAppBackup ? app : 0]);
-    lcd.drawString(line, 16, 52);
-    lcd.setTextSize(1);
-    lcd.setTextColor(kDim, kBg);
-    lcd.drawString("restarting...", 16, 78);
-
+    // on screen until the next feature draws its first frame.  Fill the bar
+    // before restarting: the visible motion is what tells the operator the
+    // press was accepted, and the filled frame remains during feature bring-up.
     Serial.printf("[launcher] restart into app %u\n", static_cast<unsigned>(app));
     Serial.flush();
-    delay(50);
+
+    drawBootBase(app);
+    for (int percent = 0; percent <= 100; percent += 4) {
+        drawBootProgress(percent);
+        delay(8);
+    }
+
+    delay(30);
     ESP.restart();
 }
 
@@ -271,6 +326,14 @@ void menuSetup()
 void menuLoop()
 {
     M5Cardputer.update();
+
+    // Fn / Aa / Opt select grid pages 1 / 2 / 3 while held.  MAIN is the
+    // default page when no modifier is down.
+    const int newPage = pageFromModifiers();
+    if (newPage != gridPage) {
+        gridPage = newPage;
+        dirty    = true;
+    }
 
     uint32_t a = 0;
     int quickSlot = -1;
@@ -310,13 +373,14 @@ void menuLoop()
     }
 
     if (slotPressed >= 0) {
-        const quickbind::Binding& b = quickbind::slots[slotPressed];
+        const quickbind::Binding& b = quickbind::slots[gridPage][slotPressed];
         if (b.kind == quickbind::kRf) {
             quickSendRf(b);
         } else if (b.kind == quickbind::kNfc) {
             quickEmulateNfc(b);  // does not return
         } else {
-            snprintf(status, sizeof(status), "%s: empty", quickbind::keyLegend(slotPressed));
+            snprintf(status, sizeof(status), "%s/%s: empty", quickbind::pageName(gridPage),
+                     quickbind::keyLegend(slotPressed));
             dirty = true;
         }
     }
