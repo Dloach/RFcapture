@@ -1,11 +1,12 @@
-# Cardputer ADV + CAP.CC1101：RF 采集回放 + NFC 读卡/模拟
+# Cardputer ADV + CAP.CC1101：RF 采集回放 / NFC 读卡 / USB-BLE 键盘
 
-M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）做两件事：
+M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载键盘做四件事：
 
 - **RF**：采集、保存并重发铁门 / 卷帘门 / 道闸等 OOK 遥控器（EV1527 / PT2262 固定码）；
-- **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）。
+- **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）；
+- **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）。
 
-系统是 launcher 三功能 + 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 四功能 + 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -24,6 +25,12 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）做两件�
 - **BACKUP**
   - 一次把 RF 永久信号、NFC 卡库、九宫格绑定写到 TF 卡；
   - `RESTORE FROM TF` 恢复三份数据（会先确认）。
+- **KEYBOARD**
+  - `USB / WIRED`：TinyUSB 复合设备（HID + CDC），插 PC 直接当键盘；
+  - `BLUETOOTH`：BLE HID，主机名 `Cardputer-KB`，支持 bonded 重连；
+  - 工作页显示 4×14 键盘映射，按键/修饰键实时高亮；`Opt` = Win/Command；
+  - `Fn+1..0` = F1..F10，`Fn+-`/`Fn+=` = F11/F12，`Fn+; . , /` = 方向键，
+    `Fn+`` = Esc，`Fn+BKSP` 返回 KEYBOARD 菜单。
 
 > 实测：315 MHz EV1527 遥控器（T≈500 µs）采集 → 保存 → 回放，铁门正常动作；
 > 门卡 `3C02B611` 的模拟已验证能开门。**码值一样不代表波形一样好**：`q40` 以下
@@ -46,9 +53,14 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）做两件�
 Windows：
 
 ```powershell
-pio run -e cardputer-adv -t upload --upload-port COM10
-.\tools\run-device.ps1          # 上传后自动复位并看日志
+pio run -e cardputer-adv -t upload --upload-port COM13
+.\tools\run-device.ps1 -Port COM13
 ```
+
+> **USB mode 0（键盘功能）**：从这一版起，USB 是 TinyUSB 复合设备（HID + CDC），
+> 不再是硬件 CDC/JTAG。运行口/VID:PID 会变，烧录使用 1200bps touch；如果 Windows
+> 找不到新口，按住键盘左上角 **G0** 再插 USB 进 ROM 下载模式，用 `esptool` 直接写。
+> 具体 COM 号以 `pio device list` 为准。
 
 macOS / Linux：
 
@@ -66,7 +78,9 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 - RF 采集页：`ENTER` 永久保存、`S` 直接发、`F` 换频段、`D` 删除、`C` 连按两次清空；
 - RF 发送页：`S` 发送、`N` 改名、`D` 删除、`B` 绑定九宫格；
 - NFC 列表：`ENTER` 模拟、`B` 绑定、`D` 删除、`N` 改名；
-- NFC 扫描：`S` 开始/停止。
+- NFC 扫描：`S` 开始/停止；
+- KEYBOARD 模式页：`ENT` 进入选中模式、`esc` 回 launcher；
+- KEYBOARD 工作页：`Fn+BKSP` 回 KEYBOARD 菜单；`Fn+`` = Esc；`Opt` = Win。
 
 ## 目录
 
@@ -76,10 +90,11 @@ cardputer/
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
-│   ├── launcher.*              launcher 三功能 + 九宫格
+│   ├── launcher.*              launcher 四功能 + 九宫格
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
 │   ├── nfc_app.*               NFC 读卡 / 列表 / 模拟
 │   ├── nfc_cards.*             NFC 卡库（SPIFFS + TF 备份）
+│   ├── kbd_app.*               USB / BLE 键盘 + 映射页
 │   ├── backup_app.*            BACKUP / RESTORE
 │   ├── bind_picker.*           九宫格绑定的模态选择器
 │   ├── quick_bind.*            九宫格绑定表（SPIFFS /quick.txt）

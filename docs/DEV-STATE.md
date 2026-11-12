@@ -8,8 +8,9 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 三功能 **RF TOOLS / NFC TOOLS / BACKUP** + 右侧 3×3 九宫格；每个功能一次重启 |
+| 功能结构 | launcher 四功能 **RF TOOLS / NFC TOOLS / KEYBOARD / BACKUP** + 右侧 3×3 九宫格；每个功能一次重启 |
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
+| KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | NFC × TF 共存 | **已解决**，见 §7.1：挂 SD 前对 ST25R3916 发 `CMD_SET_DEFAULT`，不要再打 G3 脉冲 |
 | NFC 模拟配方 | **§14.2 是唯一权威**；§13.6 是首次成功记录，§13.5 是已被推翻的历史（当时判定“做不到”） |
 | NFC 实验代际 | `nfc_spike/nfc_emu/nfc_example/nfc_store` 已在 **v1.1.0** 删除；历史见 tag `archive-nfc-spikes-2026-11-12` |
@@ -17,6 +18,16 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | 永久列表撕裂 | P0-2 已改为 blob→count 提交 + 按字节数自愈；`recoverSavedCount()` 有 host 测试 |
 | 同码重采 | P0-3：新波形分数显著更高时自动替换，`BETTER WAVE`；再次 ENTER 可更新永久列表 |
 | host 测试 | **43 项全过**（g++ 15.2 / WSL 验证） |
+
+### 0.1 KEYBOARD 速查
+
+- `platformio.ini` 把 `ARDUINO_USB_MODE` 从 1 改成 **0**，全固件 TinyUSB CDC + HID；
+  运行口会变，烧录走 1200bps touch，G0 + 上电是 ROM 兜底。
+- KEYBOARD 是两层页面：模式选择页（USB / BLUETOOTH）→ 键盘工作页；工作页
+  `Fn+BKSP` 软重启回模式选择页，模式选择页 `esc` 回 launcher。
+- 工作页显示 4×14 映射并高亮按下键；`Opt` = Win/Command；
+  `Fn+1..0`/`Fn+-`/`Fn+=` = F1..F12；`Fn+; . , /` = 方向键；`Fn+\`` = Esc。
+- BLE 重连：连接时强制 CCCD 通知 + `ESP_BLE_SEC_ENCRYPT` + 每秒补发当前报文。
 
 > 下面 §1–§14 是历史记录，按时间保留；与 §0 冲突时以 §0 和最新代码为准。
 > `retry/` 是独立参考工程，源码仍在 git 中；不要在出货固件里引用它。

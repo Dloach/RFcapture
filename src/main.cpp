@@ -17,13 +17,14 @@
 
 #include "app.h"
 #include "backup_app.h"
+#include "kbd_app.h"
 #include "launcher.h"
 #include "nfc_app.h"
 #include "rf_config.h"
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup };
+enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd };
 
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
@@ -78,6 +79,11 @@ void setup()
             backupapp::setup();
             break;
 
+        case launcher::kAppKbd:
+            g_running = Running::kKbd;
+            kbdapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
@@ -96,6 +102,9 @@ void loop()
             break;
         case Running::kBackup:
             backupapp::loop();
+            break;
+        case Running::kKbd:
+            kbdapp::loop();
             break;
         default:
             launcher::menuLoop();

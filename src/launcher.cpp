@@ -169,14 +169,14 @@ void draw()
     lcd.setTextColor(kText, kHead);
     lcd.drawRightString(bat, lcd.width() - 3, 2);
 
-    // Left: the three features, spread over the body like the RF home page.
-    // Highlight is colour + bar only, no ">" prefix: at text size 2 the marker
-    // pushed "NFC TOOLS" to 120 px wide, spilling over the divider onto the grid.
-    const char* items[] = {"RF TOOLS", "NFC TOOLS", "BACKUP"};
+    // Left: the four features, spread over the body.  Highlight is colour + bar
+    // only, no ">" prefix: at text size 2 the marker pushed "NFC TOOLS" to 120 px
+    // wide, spilling over the divider onto the grid.
+    const char* items[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "BACKUP"};
     lcd.setTextSize(2);
-    for (int i = 0; i < 3; ++i) {
-        const int y = 30 + i * 28;
-        if (i == sel) lcd.fillRect(2, y - 4, 112, 22, kBar);
+    for (int i = 0; i < 4; ++i) {
+        const int y = 22 + i * 22;
+        if (i == sel) lcd.fillRect(2, y - 4, 112, 20, kBar);
         lcd.setTextColor(i == sel ? kAccent : kText, i == sel ? kBar : kBg);
         lcd.drawString(items[i], 8, y);
     }
@@ -184,7 +184,7 @@ void draw()
 
     if (status[0]) {
         lcd.setTextColor(kDim, kBg);
-        lcd.drawString(status, 4, 106);
+        lcd.drawString(status, 4, 108);
     }
 
     // Right: the 3x3 quick-bind grid for the current modifier page.
@@ -219,7 +219,7 @@ constexpr int kBootBarY = 86;
 constexpr int kBootBarW = 192;
 constexpr int kBootBarH = 14;
 
-const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP"};
+const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD"};
 
 void drawBootBase(App app)
 {
@@ -228,7 +228,7 @@ void drawBootBase(App app)
     lcd.setTextColor(kText, kHead);
     lcd.drawString("CARDPUTER", 3, 2);
 
-    const char* name = kBootName[app <= kAppBackup ? app : 0];
+    const char* name = kBootName[app <= kAppKbd ? app : 0];
     lcd.setTextSize(2);
     lcd.setTextColor(kAccent, kBg);
     lcd.drawString(name, (lcd.width() - lcd.textWidth(name)) / 2, 52);
@@ -269,7 +269,7 @@ App currentApp()
     if (!p.begin(kNs, true)) return kAppMenu;
     const uint8_t v = p.getUChar("app", kAppMenu);
     p.end();
-    return v <= kAppBackup ? static_cast<App>(v) : kAppMenu;
+    return v <= kAppKbd ? static_cast<App>(v) : kAppMenu;
 }
 
 void rebootInto(App app)
@@ -360,16 +360,18 @@ void menuLoop()
     prevSlot               = quickSlot;
 
     if (pressed & (1u << 0)) {
-        sel    = (sel + 2) % 3;  // up, wrapping
+        sel    = (sel + 3) % 4;  // up, wrapping
         dirty  = true;
     }
     if (pressed & (1u << 1)) {
-        sel    = (sel + 1) % 3;  // down, wrapping
+        sel    = (sel + 1) % 4;  // down, wrapping
         dirty  = true;
     }
     if (pressed & (1u << 2)) {
-        // does not return
-        rebootInto(sel == 0 ? kAppRf : (sel == 1 ? kAppNfc : kAppBackup));
+        // does not return.  Keep BACKUP's numeric App value at 3; the menu
+        // order is independent of the NVS appboot values.
+        static const App kMenuApp[] = {kAppRf, kAppNfc, kAppKbd, kAppBackup};
+        rebootInto(kMenuApp[sel]);
     }
 
     if (slotPressed >= 0) {
