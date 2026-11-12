@@ -14,14 +14,17 @@
 
 #pragma once
 
+#include <stdint.h>
+
 namespace nfcapp {
 
 void setup();
 void loop();
 
 // Queue a boot straight into emulation of card `idx` (writes the nfcretry boot
-// flag).  The caller then reboots into kAppNfc -- launcher.h's rebootInto().
+// flag).  `key` is the stable quickbind key; zero is a legacy index-only
+// binding.  The caller then reboots into kAppNfc -- launcher.h's rebootInto().
 // Used by the home grid's one-key emulation.
-void queueEmulation(uint8_t idx);
+void queueEmulation(uint8_t idx, uint32_t key = 0);
 
 }  // namespace nfcapp

@@ -79,22 +79,25 @@ bool nfcReady = false;
 void fieldOff();  // defined with scanOnce(), below; used by every reboot path
 
 // ---------------------------------------------------------------------------
-// Boot mode: reader or emulator.  One NVS namespace, two bytes.
+// Boot mode: reader or emulator.  One NVS namespace, two bytes plus an optional
+// stable binding key.
 // ---------------------------------------------------------------------------
 constexpr char kNs[] = "nfcretry";
 
 struct Boot {
     uint8_t mode;  // 0 = reader, 1 = emulate card[idx]
     uint8_t idx;
+    uint32_t key;  // stable quickbind key; 0 = legacy index-only binding
 };
 
 Boot readBoot()
 {
     Preferences p;
-    Boot b{0, 0};
+    Boot b{0, 0, 0};
     if (p.begin(kNs, true)) {
         b.mode = p.getUChar("mode", 0);
         b.idx  = p.getUChar("idx", 0);
+        b.key  = p.getUInt("key", 0);
         p.end();
     }
     return b;
@@ -106,11 +109,12 @@ void clearBoot()
     if (p.begin(kNs, false)) {
         p.remove("mode");
         p.remove("idx");
+        p.remove("key");
         p.end();
     }
 }
 
-void rebootAs(const uint8_t mode, const uint8_t idx)
+void rebootAs(const uint8_t mode, const uint8_t idx, const uint32_t key = 0)
 {
     // Kill the carrier before leaving: the ST25R3916 keeps its registers
     // across an ESP32 restart, and a live 13.56 MHz field corrupts the SD
@@ -120,6 +124,11 @@ void rebootAs(const uint8_t mode, const uint8_t idx)
     if (p.begin(kNs, false)) {
         p.putUChar("mode", mode);
         p.putUChar("idx", idx);
+        if (key != 0) {
+            p.putUInt("key", key);
+        } else {
+            p.remove("key");
+        }
         p.end();
     }
     Serial.flush();
@@ -526,7 +535,7 @@ void startEmulationOf(int index)
     if (index < 0 || index >= nfccards::count) return;
     const nfccards::Card& c = nfccards::cards[index];
     if (!nfccards::replayable(c)) return;
-    rebootAs(1, static_cast<uint8_t>(index));
+    rebootAs(1, static_cast<uint8_t>(index), quickbind::keyForNfc(c.uid, c.len));
 }
 
 // A failed arm used to reboot straight back to the reader menu with no message
@@ -633,9 +642,12 @@ void handleKeys(uint32_t pressed)
             if (pressed & kEnter) startEmulationOf(listSel);
             if (pressed & kBind) {
                 if (nfccards::count) {
-                    // Modal picker: grid key, then icon, then color.
-                    bindpick::run(quickbind::kNfc, static_cast<uint8_t>(listSel),
-                                  nfccards::cards[listSel].name);
+                    // Modal picker: grid key, then icon, then color.  Store the
+                    // UID-derived key so deleting an earlier card cannot make
+                    // this slot emulate a different one.
+                    const nfccards::Card& c = nfccards::cards[listSel];
+                    bindpick::run(quickbind::kNfc, static_cast<uint8_t>(listSel), c.name,
+                                  quickbind::keyForNfc(c.uid, c.len));
                     dirty = true;
                 }
             }
@@ -786,7 +798,7 @@ void readerLoop()
 // loop does Units.update() then emu.update() and nothing else, except a keyboard
 // poll while the card is idle.
 // ---------------------------------------------------------------------------
-void emulatorSetup(uint8_t idx)
+void emulatorSetup(uint8_t idx, uint32_t key)
 {
     // Emulation must be chosen before begin().
     auto ucfg      = unit.config();
@@ -814,7 +826,29 @@ void emulatorSetup(uint8_t idx)
     if (nfccards::count == 0) {
         emuFail("NO CARDS STORED");
     }
-    emuIdx = idx % nfccards::count;
+
+    // Resolve by stable key first.  The index in a quick binding is only a hint:
+    // deleting an earlier card shifts it, and the old `idx % count` would then
+    // silently put a different card on the air.  A zero key is a legacy binding;
+    // it may use the index but still has to land on a replayable card.
+    int chosen = -1;
+    if (key != 0) {
+        for (uint8_t i = 0; i < nfccards::count; ++i) {
+            if (quickbind::keyForNfc(nfccards::cards[i].uid, nfccards::cards[i].len) == key) {
+                chosen = i;
+                break;
+            }
+        }
+    } else if (idx < nfccards::count) {
+        chosen = idx;
+    }
+    if (chosen < 0) {
+        emuFail("BINDING STALE");
+    }
+    if (!nfccards::replayable(nfccards::cards[chosen])) {
+        emuFail("CARD NOT REPLAYABLE");
+    }
+    emuIdx = static_cast<uint8_t>(chosen);
 
     const nfccards::Card& c = nfccards::cards[emuIdx];
 
@@ -899,14 +933,19 @@ namespace nfcapp {
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
-void queueEmulation(uint8_t idx)
+void queueEmulation(uint8_t idx, uint32_t key)
 {
-    // Same flag rebootAs(1, idx) writes, without the restart: the caller (the
-    // launcher's home grid) does the reboot itself through rebootInto().
+    // Same flag rebootAs(1, idx, key) writes, without the restart: the caller
+    // (the launcher's home grid) does the reboot itself through rebootInto().
     Preferences p;
     if (p.begin(kNs, false)) {
         p.putUChar("mode", 1);
         p.putUChar("idx", idx);
+        if (key != 0) {
+            p.putUInt("key", key);
+        } else {
+            p.remove("key");
+        }
         p.end();
     }
 }
@@ -941,7 +980,7 @@ void setup()
     gEmuMode         = (boot.mode == 1);
     if (gEmuMode) {
         clearBoot();
-        emulatorSetup(boot.idx);
+        emulatorSetup(boot.idx, boot.key);
     } else {
         readerSetup();
     }

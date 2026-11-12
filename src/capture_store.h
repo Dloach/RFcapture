@@ -40,6 +40,18 @@ inline bool similarTrain(const uint16_t* a, const uint16_t* b, int count)
     return true;
 }
 
+/// Should a repeated capture replace the stored waveform?  A held remote lands
+/// on the same code many times a second, and a 1-point jitter must not rewrite
+/// NVS.  Ten points is a real improvement; the old-entry exception gives a
+/// once-bad waveform (q < 40, README's "delete and re-capture" case) a chance
+/// to heal in place instead of forcing the operator to delete it first.
+inline bool shouldReplaceWaveform(uint8_t oldQ, uint8_t newQ)
+{
+    if (oldQ == 0) return newQ > 0;
+    if (oldQ < 40 && newQ >= 60) return true;
+    return uint16_t(newQ) >= uint16_t(oldQ) + 10u;
+}
+
 class CaptureStore {
 public:
     void begin();  // load from NVS
@@ -56,9 +68,12 @@ public:
         return index >= 0 && index < count_ ? quality_[index] : 0;
     }
 
-    /// Store a burst, or bump the hit counter of an identical one.
+    /// Store a burst, or bump the hit counter of an identical one.  When the
+    /// same signal arrives with a significantly better waveform, replace the
+    /// stored pulses in place (keeping hits) and set `improved`.
     /// Returns the index, or -1 when the burst is unusable.
-    int ingest(const RfFrame& frame, const Decoded& decoded, RfBand band, bool* isNew);
+    int ingest(const RfFrame& frame, const Decoded& decoded, RfBand band, bool* isNew,
+               bool* improved = nullptr);
 
     void remove(int index);
     void clear();

@@ -8,11 +8,15 @@ constexpr uint32_t kMagic = 0x4331u;
 
 // A RAW capture never went through the decoder, so it has no measured base time;
 // estimate one from the train itself.
+uint8_t scoreTrain(const uint16_t* pulses, int count, uint16_t base)
+{
+    if (base < 40) base = estimateBaseUs(pulses, count);
+    return scoreWaveform(pulses, count, base);
+}
+
 uint8_t scoreOf(const Capture& c)
 {
-    uint16_t base = c.baseUs;
-    if (base < 40) base = estimateBaseUs(c.pulses, c.count);
-    return scoreWaveform(c.pulses, c.count, base);
+    return scoreTrain(c.pulses, c.count, c.baseUs);
 }
 
 }  // namespace
@@ -82,9 +86,11 @@ void CaptureStore::flush()
     save();
 }
 
-int CaptureStore::ingest(const RfFrame& frame, const Decoded& decoded, RfBand band, bool* isNew)
+int CaptureStore::ingest(const RfFrame& frame, const Decoded& decoded, RfBand band, bool* isNew,
+                         bool* improved)
 {
     if (isNew) *isNew = false;
+    if (improved) *improved = false;
 
     // Normalise: drop leading idle pulses so that pulses[0] is always a carrier
     // burst, then keep at most what fits into one capture.
@@ -133,16 +139,40 @@ int CaptureStore::ingest(const RfFrame& frame, const Decoded& decoded, RfBand ba
         bool same = false;
         if (decoded.valid && items_[i].valid) {
             same = (items_[i].bits == decoded.bits && items_[i].code == decoded.code);
-        } else if (items_[i].count == count) {
+        } else if (!items_[i].valid && items_[i].count == count) {
             same = similarTrain(items_[i].pulses, train, count);
         }
         if (same) {
             // Bumping the counter does not write to NVS: a held remote lands
             // here many times a second and each write rewrites the whole blob.
             // flush() batches it, and losing the last few counts is harmless.
+            //
+            // The waveform, however, is worth replacing when the same code was
+            // captured much more cleanly: the old entry may be the q30 one the
+            // README tells the operator to "delete and re-capture", and simply
+            // re-capturing it is the natural action.  Keep the hit count and
+            // band; the code is identical by the dedup test above.
+            const uint8_t newQ = scoreTrain(train, count, decoded.baseUs);
+            const bool replace = shouldReplaceWaveform(quality_[i], newQ);
+            if (replace) {
+                Capture& c = items_[i];
+                c.code     = decoded.valid ? decoded.code : 0;
+                c.baseUs   = decoded.baseUs;
+                c.bits     = decoded.bits;
+                c.proto    = static_cast<uint8_t>(decoded.proto);
+                c.valid    = decoded.valid;
+                c.count    = static_cast<uint16_t>(count);
+                for (int k = 0; k < count; ++k) c.pulses[k] = train[k];
+                quality_[i] = newQ;
+            }
+
             if (items_[i].hits < 0xFFFF) {
                 items_[i].hits++;
                 dirty_ = true;
+            }
+            if (replace) {
+                save();
+                if (improved) *improved = true;
             }
             return i;
         }

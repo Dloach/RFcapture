@@ -594,9 +594,13 @@ void App::handleAction(uint32_t action)
             if (saved_.empty()) {
                 toast("NO SAVED SIGNAL");
             } else {
-                // Modal picker: grid key, then icon, then color.
-                bindpick::run(quickbind::kRf, static_cast<uint8_t>(sendSel_),
-                              saved_.at(sendSel_).name);
+                // Modal picker: grid key, then icon, then color.  The key keeps
+                // the binding pointing at this signal even if an earlier entry
+                // is deleted or the list is restored in a different order.
+                const SavedSignal& s = saved_.at(sendSel_);
+                bindpick::run(quickbind::kRf, static_cast<uint8_t>(sendSel_), s.name,
+                              quickbind::keyForRf(static_cast<uint8_t>(s.band), s.proto != 0,
+                                                  s.code, s.bits, s.pulses, s.count));
                 dirty_ = true;
             }
         }
@@ -699,7 +703,8 @@ void App::pollReceiver()
         }
 
         bool isNew      = false;
-        const int index = store_.ingest(frame, decoded, band_, &isNew);
+        bool improved   = false;
+        const int index = store_.ingest(frame, decoded, band_, &isNew, &improved);
         if (index < 0) continue;
 
         rebuildView();
@@ -720,6 +725,13 @@ void App::pollReceiver()
                           static_cast<unsigned>(decoded.baseUs),
                           static_cast<unsigned>(store_.at(index).hits),
                           static_cast<unsigned>(store_.at(index).count));
+        } else if (improved) {
+            beep(2200, 25);
+            toast("BETTER WAVE");
+            Serial.printf("[cap] %s %s %06lX waveform updated q%02u\n",
+                          rfcfg::bandName(band_), protocolName(decoded.proto),
+                          static_cast<unsigned long>(decoded.code & 0xFFFFFFu),
+                          static_cast<unsigned>(store_.quality(index)));
         }
         dirty_ = true;
     }
@@ -874,13 +886,23 @@ void App::confirmSave()
 {
     if (viewCount_ == 0) return;
     int index = -1;
-    if (saved_.add(store_.at(view_[sel_]), &index)) {
-        toast("SAVED");
-        Serial.printf("[save] #%d '%s'\n", index, saved_.at(index).name);
-    } else if (index >= 0) {
-        toast("ALREADY SAVED");
-    } else {
-        toast("SAVE LIST FULL");
+    const SavedStore::AddResult result = saved_.add(store_.at(view_[sel_]), &index);
+    switch (result) {
+        case SavedStore::AddResult::kAdded:
+            toast("SAVED");
+            Serial.printf("[save] #%d '%s'\n", index, saved_.at(index).name);
+            break;
+        case SavedStore::AddResult::kUpdated:
+            toast("WAVEFORM UPDATED");
+            Serial.printf("[save] #%d '%s' waveform updated q%02u\n", index,
+                          saved_.at(index).name, static_cast<unsigned>(saved_.quality(index)));
+            break;
+        case SavedStore::AddResult::kDuplicate:
+            toast("ALREADY SAVED");
+            break;
+        case SavedStore::AddResult::kFull:
+            toast("SAVE LIST FULL");
+            break;
     }
 }
 

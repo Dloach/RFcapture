@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Host side unit test for src/ook_decoder.cpp.
  *
  * It synthesises EV1527 / PT2262 pulse trains the way a 433 MHz receiver plus
@@ -15,6 +15,9 @@
 #include <cstring>
 
 #include "ook_decoder.h"
+#include "capture_store.h"
+#include "quick_bind.h"
+#include "saved_store.h"
 
 namespace {
 
@@ -326,6 +329,62 @@ void testScoreWaveform()
     check(badParity <= 39, what);
 }
 
+void testBindingKeys()
+{
+    printf("Quick-bind stable keys\n");
+
+    const uint16_t a[4] = {340, 1020, 340, 1020};
+    const uint16_t b[4] = {338, 1018, 342, 1022};
+    const uint16_t c[4] = {1000, 340, 1000, 340};
+
+    check(quickbind::keyForRf(0, true, 0x123456u, 24, a, 4) ==
+              quickbind::keyForRf(0, true, 0x123456u, 24, b, 4),
+          "decoded RF key ignores waveform jitter");
+    check(quickbind::keyForRf(0, true, 0x123456u, 24, a, 4) !=
+              quickbind::keyForRf(1, true, 0x123456u, 24, a, 4),
+          "decoded RF key includes the band");
+    check(quickbind::keyForRf(0, false, 0, 0, a, 4) !=
+              quickbind::keyForRf(0, false, 0, 0, c, 4),
+          "RAW RF key changes with the pulse train");
+    check(quickbind::keyForRf(0, true, 0, 24, a, 4) != 0 &&
+              quickbind::keyForRf(0, true, 0, 24, a, 4) !=
+                  quickbind::keyForRf(0, false, 0, 0, a, 4),
+          "decoded code 0 is legal and stays distinct from RAW");
+    check(quickbind::keyForRf(0, true, 0x123456u, 24, a, 4) !=
+              quickbind::keyForRf(0, true, 0x123456u, 12, a, 4),
+          "decoded RF key includes the bit count");
+
+    const uint8_t uid1[4] = {0x3C, 0x02, 0xB6, 0x11};
+    const uint8_t uid2[4] = {0x3C, 0x02, 0xB6, 0x12};
+    check(quickbind::keyForNfc(uid1, 4) == quickbind::keyForNfc(uid1, 4) &&
+              quickbind::keyForNfc(uid1, 4) != quickbind::keyForNfc(uid2, 4) &&
+              quickbind::keyForNfc(uid1, 4) != 0,
+          "NFC key follows the UID");
+}
+
+void testWaveformReplacementPolicy()
+{
+    printf("Waveform replacement policy\n");
+    check(shouldReplaceWaveform(0, 1), "empty score can be replaced");
+    check(shouldReplaceWaveform(30, 60), "bad waveform heals at q60");
+    check(shouldReplaceWaveform(50, 60), "ten point gain replaces");
+    check(!shouldReplaceWaveform(50, 55), "five point gain does not rewrite NVS");
+    check(!shouldReplaceWaveform(90, 95), "small gain on a good waveform is ignored");
+}
+
+void testSavedRecoveryCount()
+{
+    printf("Permanent-list torn-write recovery\n");
+    const size_t rec = sizeof(SavedSignal);
+    check(recoverSavedCount(rec * 3, 3, rec, 8) == 3, "complete blob + matching count");
+    check(recoverSavedCount(rec * 3, 2, rec, 8) == 2, "uncommitted tail is ignored");
+    check(recoverSavedCount(rec * 3, 5, rec, 8) == 3, "count larger than blob is clamped");
+    check(recoverSavedCount(rec * 3 + 1, 3, rec, 8) == 3, "partial tail keeps committed records");
+    check(recoverSavedCount(rec * 2 + 1, 3, rec, 8) == 2, "short blob recovers its whole records");
+    check(recoverSavedCount(0, 0, rec, 8) == 0, "empty store restores zero");
+    check(recoverSavedCount(rec * 10, 10, rec, 8) == 8, "blob is clamped to the array size");
+}
+
 }  // namespace
 
 int main()
@@ -337,6 +396,9 @@ int main()
     testBitsFormatting();
     testEstimateBaseUs();
     testScoreWaveform();
+    testBindingKeys();
+    testWaveformReplacementPolicy();
+    testSavedRecoveryCount();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -31,12 +31,16 @@ void load()
         }
         line[n] = '\0';
         int s = -1, kind = 0, index = 0, icon = 0, color = 0;
-        if (sscanf(line, "%d;%d;%d;%d;%d", &s, &kind, &index, &icon, &color) != 5) continue;
+        unsigned long key = 0;
+        const int fields =
+            sscanf(line, "%d;%d;%d;%d;%d;%lu", &s, &kind, &index, &icon, &color, &key);
+        if (fields < 5) continue;
         if (s < 0 || s >= kSlots || kind < kRf || kind > kNfc) continue;
         slots[s].kind  = static_cast<uint8_t>(kind);
         slots[s].index = static_cast<uint8_t>(index & 0xFF);
         slots[s].icon  = static_cast<uint8_t>(icon % kIconCount);
         slots[s].color = static_cast<uint8_t>(color % kColorCount);
+        slots[s].key   = fields >= 6 ? static_cast<uint32_t>(key) : 0;
     }
     f.close();
 }
@@ -48,9 +52,10 @@ bool save()
     if (!f) return false;
     for (int i = 0; i < kSlots; ++i) {
         if (slots[i].kind == kNone) continue;
-        f.printf("%d;%u;%u;%u;%u\n", i, static_cast<unsigned>(slots[i].kind),
+        f.printf("%d;%u;%u;%u;%u;%lu\n", i, static_cast<unsigned>(slots[i].kind),
                  static_cast<unsigned>(slots[i].index), static_cast<unsigned>(slots[i].icon),
-                 static_cast<unsigned>(slots[i].color));
+                 static_cast<unsigned>(slots[i].color),
+                 static_cast<unsigned long>(slots[i].key));
     }
     f.close();
     return true;
@@ -63,13 +68,14 @@ void clear(int slot)
     save();
 }
 
-void set(int slot, uint8_t kind, uint8_t index, uint8_t icon, uint8_t color)
+void set(int slot, uint8_t kind, uint8_t index, uint8_t icon, uint8_t color, uint32_t key)
 {
     if (slot < 0 || slot >= kSlots) return;
     slots[slot].kind  = kind;
     slots[slot].index = index;
     slots[slot].icon  = icon;
     slots[slot].color = color;
+    slots[slot].key   = key;
     save();
 }
 

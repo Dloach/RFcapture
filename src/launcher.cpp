@@ -64,14 +64,43 @@ void rfSetupIfBound()
                   static_cast<int>(txReady), saved.size());
 }
 
+uint32_t savedKey(const SavedSignal& s)
+{
+    return quickbind::keyForRf(static_cast<uint8_t>(s.band), s.proto != 0, s.code, s.bits,
+                               s.pulses, s.count);
+}
+
 void quickSendRf(const quickbind::Binding& b)
 {
-    if (!rfReady || !txReady || b.index >= saved.size()) {
+    if (!rfReady || !txReady) {
         snprintf(status, sizeof(status), "RF not ready");
         dirty = true;
         return;
     }
-    const SavedSignal& s = saved.at(b.index);
+
+    // Resolve the bound signal by its stable key, not by its old array index:
+    // deleting an earlier signal shifts every later index, and the previous
+    // range check would then send whichever signal inherited that slot.
+    int idx = -1;
+    if (b.key != 0) {
+        for (int i = 0; i < saved.size(); ++i) {
+            if (savedKey(saved.at(i)) == b.key) {
+                idx = i;
+                break;
+            }
+        }
+    } else if (b.index < saved.size()) {
+        // Legacy binding written before keys existed: use the index once, and
+        // let the next re-bind store a key.
+        idx = b.index;
+    }
+    if (idx < 0) {
+        snprintf(status, sizeof(status), "BINDING STALE");
+        dirty = true;
+        return;
+    }
+
+    const SavedSignal& s = saved.at(idx);
 
     g_cc1101.setBand(s.band);
     g_cc1101.enterTx();
@@ -103,8 +132,8 @@ void quickSendRf(const quickbind::Binding& b)
 
 void quickEmulateNfc(const quickbind::Binding& b)
 {
-    nfcapp::queueEmulation(b.index);  // writes the nfcretry boot flag
-    rebootInto(kAppNfc);              // does not return
+    nfcapp::queueEmulation(b.index, b.key);  // writes the nfcretry boot flag
+    rebootInto(kAppNfc);                     // does not return
 }
 
 // ---------------------------------------------------------------------------

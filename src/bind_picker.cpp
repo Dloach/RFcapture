@@ -124,7 +124,7 @@ void drawColors(int sel, const char* what)
 
 }  // namespace
 
-bool run(uint8_t kind, uint8_t index, const char* what)
+bool run(uint8_t kind, uint8_t index, const char* what, uint32_t key)
 {
     // The slot table is only loaded by the launcher's menuSetup; an RF or NFC
     // feature boot never runs that, so without this reload the picker would
@@ -192,10 +192,11 @@ bool run(uint8_t kind, uint8_t index, const char* what)
             if (pressed & kRight) color = (color + 1) % quickbind::kColorCount;
             if (pressed & kEnter) {
                 quickbind::set(slot, kind, index, static_cast<uint8_t>(icon),
-                               static_cast<uint8_t>(color));
-                Serial.printf("[bind] slot=%s kind=%u index=%u icon=%d color=%d\n",
+                               static_cast<uint8_t>(color), key);
+                Serial.printf("[bind] slot=%s kind=%u index=%u icon=%d color=%d key=%08lX\n",
                               quickbind::keyLegend(slot), static_cast<unsigned>(kind),
-                              static_cast<unsigned>(index), icon, color);
+                              static_cast<unsigned>(index), icon, color,
+                              static_cast<unsigned long>(key));
                 return true;
             }
             drawColors(color, what);
