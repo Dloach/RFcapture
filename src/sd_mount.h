@@ -39,15 +39,20 @@ inline bool ensure(const bool cutRadioPower = false)
                       M5.getPin(m5::pin_name_t::sd_spi_mosi));
     }
 
-    // Power the radio module down first.
+    // Deselect the two radio chips while the card is talked to.  main.cpp does
+    // the same at boot; repeat it here because the deferred NFC-side SD actions
+    // (nfccards::runPendingAction) reach this function through a different path.
     //
-    // CAP.CC1101 puts the CC1101 *and* the ST25R3916 behind one POWER_EN line
-    // (GPIO 3), and both share SCK/MOSI/MISO with the SD slot.  A powered
-    // ST25R3916 keeps driving MISO, so the card cannot answer and every mount
-    // attempt dies on its 601 ms timeout -- and because the chip stays powered
-    // across a reboot, only unplugging the board cleared it.  Cutting POWER_EN is
-    // the documented way to share this bus: the other device leaves the bus before
-    // the card is spoken to.
+    // Never cut module power (POWER_EN, GPIO 3) to do this: while the module is
+    // unpowered the live SPI pins feed its chips through their pin clamp diodes,
+    // the rail never collapses, and the chips come back half-powered and deaf
+    // for the rest of the power cycle.  Explicitly driving both CS lines high
+    // is enough: a deselected ST25R3916 tri-states its MISO.
+    pinMode(5, OUTPUT);   // CC1101 CS
+    digitalWrite(5, HIGH);
+    pinMode(6, OUTPUT);   // ST25R3916 CS
+    digitalWrite(6, HIGH);
+
     // The bus has to exist with the board's own pins before the card can be
     // talked to.  In the RF feature the CC1101 driver happens to call SPI.begin()
     // first, and the SD mount inherited that; a build that touches no radio (the
@@ -58,6 +63,41 @@ inline bool ensure(const bool cutRadioPower = false)
               static_cast<int8_t>(M5.getPin(m5::pin_name_t::sd_spi_mosi)),
               static_cast<int8_t>(cs < 0 ? 12 : cs));
     delay(10);
+
+    // Soft-reset the ST25R3916 before touching the card.
+    //
+    // The chip keeps its registers across an ESP32 restart, and the NFC reader
+    // configuration ends with the 13.56 MHz carrier ON (nfc_initial_field_on).
+    // A live field on the shared flex is what corrupts the card's init -- the
+    // exact failure is four 601 ms timeouts at every clock speed.  A power
+    // pulse on POWER_EN also clears it but phantom-feeds the chip through the
+    // live SPI pins, which kills the NFC feature for the rest of the power
+    // cycle.  CMD_SET_DEFAULT puts the chip back to its power-up state
+    // (carrier off) with two bytes on the bus; the NFC feature reconfigures
+    // everything from scratch on its own begin(), so nothing is lost.
+    //
+    // Raw framing, SPI mode 1 (the ST25R3916 is the only mode-1 device here):
+    // first byte OP_READ_REGISTER(0x40)|reg / OP_WRITE_REGISTER(0x00)|reg, then
+    // CMD_SET_DEFAULT(0xC1) as a direct command.  An absent cap answers 0xFF
+    // and is skipped.
+    {
+        pinMode(6, OUTPUT);
+        uint8_t opctl = 0xFF;
+        SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
+        digitalWrite(6, LOW);
+        SPI.transfer(0x40 | 0x02);  // read REG_OPERATION_CONTROL
+        opctl = SPI.transfer(0x00);
+        digitalWrite(6, HIGH);
+        if (opctl != 0xFF) {
+            digitalWrite(6, LOW);
+            SPI.transfer(0xC1);  // CMD_SET_DEFAULT: power-up state, carrier off
+            digitalWrite(6, HIGH);
+        }
+        SPI.endTransaction();
+        Serial.printf("[sd] st25r opctl=%02X %s\n", opctl,
+                      opctl == 0xFF ? "(no chip)" : "-> SET_DEFAULT");
+        delay(5);
+    }
 
     static const uint32_t kFreqs[] = {10000000, 4000000, 1000000, 400000};
     for (uint32_t f : kFreqs) {

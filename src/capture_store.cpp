@@ -60,6 +60,11 @@ void CaptureStore::save()
     prefs.putUInt("magic", kMagic);
     if (count_ > 0) {
         prefs.putBytes("items", items_, sizeof(Capture) * size_t(count_));
+    } else {
+        // An empty list must remove the blob, not just zero the count:
+        // begin()'s torn-write recovery rebuilds the list from a leftover
+        // blob, which is why "clear all" used to come back after a reboot.
+        prefs.remove("items");
     }
     // Write the count last: it acts as the commit marker, so a write that is cut
     // short leaves the previous count with the previous blob instead of a count

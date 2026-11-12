@@ -19,6 +19,7 @@
 #include "backup_app.h"
 #include "launcher.h"
 #include "nfc_app.h"
+#include "rf_config.h"
 
 namespace {
 
@@ -31,23 +32,31 @@ App* g_rf         = nullptr;
 
 void setup()
 {
-    const launcher::App app = launcher::currentApp();
-
-    // Reset the radio module, but ONLY for the BACKUP feature.
+    // Deselect every device on the shared SPI bus (SCK 40 / MOSI 14 / MISO 39)
+    // before anything touches it, and keep the module powered.
     //
-    // CC1101 (CS 5), the ST25R3916 (CS 6) and the SD card (CS 12) share the SPI
-    // bus, and after the NFC feature has driven the chip it keeps driving MISO, so
-    // the card cannot answer until the module is power-cycled.  A short power
-    // pulse here clears that -- but the pulse also upsets the ST25R3916's own
-    // bring-up, so it must not run on boots that are going to use the NFC chip.
-    // BACKUP uses no radio at all, which makes it the one place the pulse is free.
-    if (app == launcher::kAppBackup) {
-        pinMode(3, OUTPUT);
-        digitalWrite(3, LOW);
-        delay(60);
-        digitalWrite(3, HIGH);
-        delay(300);
-    }
+    // After any reboot these pins come up as floating inputs, and a floating
+    // NFC_CS reads as "selected" to the ST25R3916: it then answers the SD
+    // card's init clocks and drives MISO, which latches the card until the
+    // next power cycle.  That -- not anything the SD slot does -- is why the
+    // TF card died after the NFC feature had been used, and why pulling CS12
+    // high alone never helped.
+    //
+    // Do NOT pulse POWER_EN (G3) to reset the module: while it is unpowered,
+    // the live SPI pins keep feeding its chips through their pin clamp diodes,
+    // the rail never collapses, and the chips come back half-powered and deaf
+    // for the rest of the power cycle.  The 60 ms pulse "fixed the SD card but
+    // killed NFC" for exactly that reason.
+    pinMode(RF_CC_CS, OUTPUT);   // CC1101
+    digitalWrite(RF_CC_CS, HIGH);
+    pinMode(RF_NFC_CS, OUTPUT);  // ST25R3916
+    digitalWrite(RF_NFC_CS, HIGH);
+    pinMode(12, OUTPUT);         // TF card
+    digitalWrite(12, HIGH);
+    pinMode(3, OUTPUT);          // POWER_EN: module always powered
+    digitalWrite(3, HIGH);
+
+    const launcher::App app = launcher::currentApp();
 
     switch (app) {
         case launcher::kAppRf:
