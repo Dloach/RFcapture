@@ -18,7 +18,8 @@
 3. SSH 客户端首选 **LibSSH-ESP32**：
    - 基于 libssh，README 明确列出 **Arduino core 2.0.17** 与 **ESP32-S3**；
    - 提供 `libssh_begin()`、SSH client、known_hosts、SCP 示例；
-   - 许可证 **LGPL-2.1**，静态链接发布需要满足可重链接义务。
+   - 许可证 **LGPL-2.1**，静态链接发布需要满足可重链接义务；
+     **已决定接受**（2026-11-13），按 LGPL 合规路径推进。
 4. **M5-SSH-Wireguard** 是 Cardputer ADV 上最完整的现成 SSH 客户端（MIT），
    有 ANSI 终端、WiFi manager、profile、Ed25519 key，但它要求
    **Arduino core ≥ 3.2.6 / ESP-IDF 5.4**，与当前 pin 冲突；只借架构和终端状态机，
@@ -117,6 +118,10 @@
 3. 发布二进制时提供可重链接所需的目标文件或完整构建产物说明；
 4. 如果不想承担 LGPL 义务，改用 **libssh2（BSD-3）**，但要自己写封装，
    SSH 阶段预留至少多 3–5 天。
+
+> **决策（2026-11-13）：接受 LGPL-2.1，使用 LibSSH-ESP32。**
+> 发布合规包时至少包含：`LICENSE`（项目自身）、`docs/THIRD-PARTY.md`、
+> LibSSH/libssh 的 LGPL 文本、可重链接的目标文件/源码与构建说明。
 
 > 个人自用不分发时风险较低；一旦把 `.bin` 发给别人，LGPL 的“可重链接”要求就生效。
 
@@ -768,6 +773,11 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
    docs/ssh-*.log
    ```
    （避免把 SSID/密码/主机名日志提交。）
+5. **LGPL 发布包（已接受 LGPL 后必须做）**：
+   - `release/ssh-lgpl/` 放 LibSSH/libssh 的目标文件或源码；
+   - 附 `BUILD.md`（PlatformIO/编译器版本、重链接命令）；
+   - 附 `THIRD-PARTY.md` 与 LGPL 全文；
+   - 只发 `.bin` 不算完成合规包。
 
 ---
 
@@ -810,8 +820,8 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 6. Phase 5 SSH 完善；
 7. 每个 Phase 结束更新 `README.md` / `docs/DEV-STATE.md` 并提交。
 
-> 关键决策点只有两个：
-> **A. 接受 LGPL 的 LibSSH-ESP32（推荐，省 3–5 天）**，还是换 BSD 的 libssh2；
-> **B. SSH 密码默认保存 —— 已决定：默认保存**（成功后写 NVS `ssh/passN`，
-> 可在 profile 编辑页清除；明文存储，设备丢失即泄露）。
-> 在这两个决定之前，Phase 0–2 可以完全独立推进。
+> **已决定的决策点：**
+> **A. SSH 库：接受 LGPL 的 LibSSH-ESP32**（2026-11-13）。
+> **B. SSH 密码：默认保存**（成功后写 NVS `ssh/passN`，可在 profile 编辑页清除；
+> 明文存储，设备丢失即泄露）。
+> Phase 0–2 仍可独立推进；Phase 3 直接按 LibSSH-ESP32 做 spike。
