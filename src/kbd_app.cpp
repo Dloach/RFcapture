@@ -39,7 +39,7 @@ constexpr uint16_t kHead   = 0x18E3;
 
 auto& lcd = M5Cardputer.Display;
 
-enum class Screen : uint8_t { kMenu, kUsb, kBle };
+enum class Screen : uint8_t { kMenu, kBtList, kUsb, kBle };
 Screen screen  = Screen::kMenu;
 int menuSel    = 0;
 bool dirty     = true;
@@ -48,7 +48,7 @@ uint32_t prevActions = 0;
 
 uint8_t prevReport[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool havePrev          = false;
-char bleStatus[24]     = "ADVERTISING";
+char bleStatus[24]     = "IDLE";
 
 USBHIDKeyboard usbKeyboard;
 
@@ -57,7 +57,14 @@ BLEHIDDevice* bleHid         = nullptr;
 BLECharacteristic* bleInput  = nullptr;
 bool bleInit                 = false;
 bool bleConnected            = false;
+bool autoAdvertise           = false;
 uint32_t lastBleKick         = 0;
+
+constexpr int kMaxBonds = 10;
+int bondCount           = 0;
+esp_bd_addr_t bondAddrs[kMaxBonds];
+int btSel               = 0;
+int btTop               = 0;
 
 // Standard 8-byte boot keyboard report map with an LED output report.
 const uint8_t kReportMap[] = {
@@ -121,11 +128,17 @@ public:
     {
         bleConnected = false;
         havePrev     = false;
-        snprintf(bleStatus, sizeof(bleStatus), "ADVERTISING");
-        statusDirty = true;
-        // Bluedroid needs advertising restarted here for a quick re-connect.
-        server->getAdvertising()->start();
-        Serial.println("[kbd] BLE disconnected, advertising");
+        if (autoAdvertise) {
+            snprintf(bleStatus, sizeof(bleStatus), "ADVERTISING");
+            statusDirty = true;
+            // Bluedroid needs advertising restarted here for a quick re-connect.
+            server->getAdvertising()->start();
+            Serial.println("[kbd] BLE disconnected, advertising");
+        } else {
+            snprintf(bleStatus, sizeof(bleStatus), "DISCONNECTED");
+            statusDirty = true;
+            Serial.println("[kbd] BLE disconnected");
+        }
     }
 };
 
@@ -402,11 +415,11 @@ void updateReport()
     }
 }
 
-void initBle()
+void initBleStack()
 {
+    if (bleInit) return;
     bleInit = true;
     snprintf(bleStatus, sizeof(bleStatus), "STARTING...");
-    drawActiveHeader();
 
     BLEDevice::init("Cardputer-KB");
     BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
@@ -435,11 +448,135 @@ void initBle()
 
     bleServer->getAdvertising()->setAppearance(HID_KEYBOARD);
     bleServer->getAdvertising()->addServiceUUID(bleHid->hidService()->getUUID());
-    bleServer->getAdvertising()->start();
 
-    snprintf(bleStatus, sizeof(bleStatus), "ADVERTISING");
-    Serial.println("[kbd] BLE advertising as Cardputer-KB");
+    snprintf(bleStatus, sizeof(bleStatus), "IDLE");
     statusDirty = true;
+    Serial.println("[kbd] BLE stack ready");
+}
+
+void formatBondAddr(const esp_bd_addr_t addr, char* out, size_t n)
+{
+    snprintf(out, n, "%02X:%02X:%02X:%02X:%02X:%02X", addr[0], addr[1], addr[2], addr[3], addr[4],
+             addr[5]);
+}
+
+void refreshBonds()
+{
+    bondCount = 0;
+    int n     = esp_ble_get_bond_device_num();
+    if (n <= 0) return;
+    if (n > kMaxBonds) n = kMaxBonds;
+
+    esp_ble_bond_dev_t list[kMaxBonds];
+    int count = n;
+    if (esp_ble_get_bond_device_list(&count, list) != ESP_OK) return;
+    if (count > kMaxBonds) count = kMaxBonds;
+    for (int i = 0; i < count; ++i) {
+        memcpy(bondAddrs[i], list[i].bd_addr, sizeof(esp_bd_addr_t));
+    }
+    bondCount = count;
+}
+
+void drawBtList()
+{
+    lcd.fillScreen(kBg);
+    header("BLUETOOTH");
+
+    constexpr int kListRows = 6;
+    const int total         = 1 + bondCount;
+    for (int r = 0; r < kListRows; ++r) {
+        const int idx = btTop + r;
+        if (idx >= total) break;
+        const int y = 18 + r * 15;
+        if (idx == btSel) lcd.fillRect(0, y - 2, lcd.width(), 14, kBar);
+        const uint16_t fg = idx == btSel ? kAccent : kText;
+        const uint16_t bg = idx == btSel ? kBar : kBg;
+
+        char line[40];
+        if (idx == 0) {
+            snprintf(line, sizeof(line), "PAIR NEW DEVICE");
+        } else {
+            char addr[24];
+            formatBondAddr(bondAddrs[idx - 1], addr, sizeof(addr));
+            snprintf(line, sizeof(line), "DEVICE %d  %s", idx, addr);
+        }
+        lcd.setTextColor(fg, bg);
+        lcd.drawString(line, 4, y);
+    }
+
+    if (bondCount == 0) {
+        lcd.setTextColor(kDim, kBg);
+        lcd.drawString("No bonded devices yet.", 6, 96);
+    }
+
+    static const Hint kHints[] = {{"ENT", "select"}, {"esc", "back"}};
+    drawHints(kHints, 2);
+}
+
+void startBleAdvertising(bool pairNew, const esp_bd_addr_t* addr)
+{
+    initBleStack();
+    auto* adv = bleServer->getAdvertising();
+    adv->stop();
+    esp_ble_gap_clear_whitelist();
+
+    if (!pairNew && addr != nullptr) {
+        // Arduino's whitelist helper uses public address type.  Windows BLE
+        // hosts normally use public addresses; random-address hosts can still
+        // use PAIR NEW DEVICE.
+        esp_bd_addr_t target;
+        memcpy(target, *addr, sizeof(target));
+        BLEDevice::whiteListAdd(BLEAddress(target));
+        adv->setScanFilter(false, true);
+    } else {
+        adv->setScanFilter(false, false);
+    }
+
+    autoAdvertise = true;
+    adv->start();
+    snprintf(bleStatus, sizeof(bleStatus), pairNew ? "PAIRING..." : "CONNECTING...");
+    statusDirty = true;
+    Serial.printf("[kbd] BLE %s\n", pairNew ? "pairing advertisement" : "targeted advertisement");
+}
+
+void enterBleList()
+{
+    screen = Screen::kBtList;
+    initBleStack();
+    refreshBonds();
+    btSel = 0;
+    btTop = 0;
+    drawBtList();
+}
+
+void beginBle(int sel)
+{
+    screen   = Screen::kBle;
+    havePrev = false;
+    bleConnected = false;
+    snprintf(bleStatus, sizeof(bleStatus), sel == 0 ? "PAIRING..." : "CONNECTING...");
+    drawActive();
+    if (sel == 0) {
+        startBleAdvertising(true, nullptr);
+    } else {
+        startBleAdvertising(false, &bondAddrs[sel - 1]);
+    }
+}
+
+void leaveBleToList()
+{
+    autoAdvertise = false;
+    if (bleServer != nullptr) {
+        bleServer->getAdvertising()->stop();
+        auto peers = bleServer->getPeerDevices(false);
+        for (auto& peer : peers) bleServer->disconnect(peer.first);
+    }
+    bleConnected = false;
+    screen       = Screen::kBtList;
+    refreshBonds();
+    btSel = 0;
+    btTop = 0;
+    drawBtList();
 }
 
 void startUsb()
@@ -452,16 +589,6 @@ void startUsb()
     usbKeyboard.begin();
     USB.begin();
     Serial.println("[kbd] USB HID started");
-}
-
-void startBle()
-{
-    screen   = Screen::kBle;
-    havePrev = false;
-    dirty    = true;
-    drawActive();
-    if (!bleInit) initBle();
-    drawActiveHeader();
 }
 
 void handleMenu(uint32_t pressed)
@@ -481,7 +608,7 @@ void handleMenu(uint32_t pressed)
         if (menuSel == 0) {
             startUsb();
         } else {
-            startBle();
+            enterBleList();
         }
         return;
     }
@@ -538,14 +665,49 @@ void loop()
         return;
     }
 
+    if (screen == Screen::kBtList) {
+        const int total = 1 + bondCount;
+        if (pressed & ((1u << 3) | (1u << 4))) {  // esc / BKSP
+            screen = Screen::kMenu;
+            dirty  = true;
+            drawMenu();
+            return;
+        }
+        if (pressed & (1u << 0)) {
+            btSel = (btSel + total - 1) % total;
+            dirty = true;
+        }
+        if (pressed & (1u << 1)) {
+            btSel = (btSel + 1) % total;
+            dirty = true;
+        }
+        if (btSel < btTop) btTop = btSel;
+        if (btSel >= btTop + 6) btTop = btSel - 5;
+
+        if (pressed & (1u << 2)) {  // ENTER: pair new or selected bond
+            beginBle(btSel);
+            return;
+        }
+        if (dirty) {
+            dirty = false;
+            drawBtList();
+        }
+        delay(5);
+        return;
+    }
+
     // Exit is Fn+Backspace only.  A bare ESC/backtick is a normal keyboard key
     // here; Fn+` sends the real Escape usage code (see updateReport()).
-    // Returning to the KEYBOARD mode menu is a reboot: Bluedroid cannot be
-    // safely deinitialised and re-initialised in one boot, and USB HID has the
-    // same one-shot lifetime.
+    // BLE returns to the device list without a reboot; the stack is already up.
+    // USB returns to the KEYBOARD mode menu by reboot (the HID stack is one-shot).
     const auto& ks = M5Cardputer.Keyboard.keysState();
     if (ks.fn && (a & (1u << 4))) {
-        launcher::rebootInto(launcher::kAppKbd);
+        if (screen == Screen::kBle) {
+            leaveBleToList();
+        } else {
+            launcher::rebootInto(launcher::kAppKbd);
+        }
+        return;
     }
 
     updateReport();
