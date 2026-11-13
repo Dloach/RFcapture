@@ -21,6 +21,8 @@ docs/signals-*.log
 # upload transcripts.
 docs/cap-*.log
 docs/upload-*.log
+docs/wifi-*.log
+docs/ssh-*.log
 
 # Standalone reference project used during NFC bring-up (superseded by the
 # unified firmware's NFC TOOLS).  Its source is tracked on purpose: it is the

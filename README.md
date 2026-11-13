@@ -119,8 +119,15 @@ cardputer/
     ├── STATE-2026-11-12.md     某一晚的状态快照
     ├── PLAN-fix-2026-11-12.md  修复计划与执行记录
     ├── PLAN-keyboard-next.md   键盘功能的执行计划
+    ├── PLAN-wifi-ssh.md        WiFi Settings + SSH 客户端开发计划
     └── RESEARCH-keyboard.md    键盘调研
 ```
+
+## 路线图
+
+下一步是 **SETTINGS → WIFI SETTINGS**（扫描、输密码、保存、开机自动连接），
+之后做 **SSH 客户端**。菜单需要先改成可滚动列表；SSH 库/许可证/内存的取舍、
+分阶段任务和验收矩阵见 [docs/PLAN-wifi-ssh.md](docs/PLAN-wifi-ssh.md)。
 
 ## 测试
 
