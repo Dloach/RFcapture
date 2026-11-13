@@ -120,6 +120,28 @@
 
 > 个人自用不分发时风险较低；一旦把 `.bin` 发给别人，LGPL 的“可重链接”要求就生效。
 
+### 2.4 LGPL 速查（给后续开发/发布用）
+
+**LGPL = GNU Lesser General Public License**，是给“库”用的弱 copyleft 许可证。
+它允许你的程序（可以是 MIT/闭源）链接 LGPL 库，而不要求你把整个程序开源；
+但分发时要满足：
+
+1. 附上 LGPL 许可证文本和版权声明（`docs/THIRD-PARTY.md`）；
+2. 如果改了 LibSSH/libssh 本身，改动的库代码仍按 LGPL 发布；
+3. 接收者必须能**替换/重新链接**这个 LGPL 库。静态链接进 `.bin` 时，
+   只发一个固件通常不够；需要同时提供可重链接的目标文件（`.o`/`.a`）或
+   完整源码 + 可复现构建脚本，让用户能换库后重新链接。
+
+对本项目的实际含义：
+
+- 自己写 `ssh_app`、`terminal` 仍可按项目许可证（建议 MIT）发布；
+- **LibSSH-ESP32 / libssh 仍是 LGPL**，不能因为项目是 MIT 就当成 MIT；
+- 只在本地自用、不把固件给别人：一般不触发分发义务；
+- 把 `.bin` 发到群里/网上/客户：需要做上面的合规包；
+- 不想处理这些：用 **libssh2（BSD-3）**，但要多写封装，SSH 阶段多 3–5 天。
+
+> 以上是工程上的通俗说明，不构成法律意见；真对外发布前按项目政策确认。
+
 ---
 
 ## 3. 目标交互与页面结构
@@ -335,18 +357,34 @@ SSH
 `profiles.txt` 格式（版本 1，一行一个，字段用 `|`）：
 
 ```text
-v1|home-server|192.168.1.10|22|alice|password|0
+v1|home-server|192.168.1.10|22|alice|password|1
 v1|lab|lab.example.com|22|root|key|1
 ```
 
 字段：`version|name|host|port|user|auth|savePassword`。
 
 - 第一版最多 4 个 profile；
-- 默认 `savePassword=0`，每次连接提示密码；勾选后才写 NVS/SPIFFS；
+- **已决定：`savePassword` 默认 1**，连接成功后把密码写入 NVS 命名空间
+  `ssh` 的 `pass0..pass3`（不写进 `profiles.txt`，避免 `|`/换行转义问题）；
+  用户可在 profile 编辑页清除，清除后每次连接提示；
+- 密码只保存在本机 NVS，明文；设备丢失=凭据泄露，和 WiFi 密码同一威胁模型；
 - 私钥只支持 Ed25519（libssh 0.11.5 / OpenSSH 新格式），第一版不做 RSA；
 - `known_hosts` 走 libssh 的 known_hosts API，不自己实现哈希。
 
 > SSH 密码/私钥同样是明文存储；和 WiFi 密码同一威胁模型。
+
+SSH 密码单独放 NVS 命名空间 `ssh`：
+
+| key | 类型 | 说明 |
+| --- | --- | --- |
+| `ver` | u8 | 1 |
+| `pass0..3` | string | 对应 profile 的密码；空=未保存 |
+| `last` | u8 | 最近使用的 profile |
+
+- 连接成功且 `savePassword=1` 才写；
+- profile 删除时同步删除对应 `passN`；
+- 不写进 `profiles.txt`，避免分隔符/换行/长度问题；
+- 用户清除密码时写空字符串，不删除整个 NVS 命名空间。
 
 ---
 
@@ -774,5 +812,6 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 
 > 关键决策点只有两个：
 > **A. 接受 LGPL 的 LibSSH-ESP32（推荐，省 3–5 天）**，还是换 BSD 的 libssh2；
-> **B. SSH 密码是否默认保存**（推荐默认不保存，每次输入）。
+> **B. SSH 密码默认保存 —— 已决定：默认保存**（成功后写 NVS `ssh/passN`，
+> 可在 profile 编辑页清除；明文存储，设备丢失即泄露）。
 > 在这两个决定之前，Phase 0–2 可以完全独立推进。
