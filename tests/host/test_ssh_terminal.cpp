@@ -63,6 +63,43 @@ void testUtf8Box()
     expect(snap[0][0].ch == '-', "UTF-8 box drawing -> ASCII '-'");
 }
 
+void testEraseModes()
+{
+    sshterm::clear();
+    const char text[] = "AAA\r\nBBB";
+    sshterm::feed(text, sizeof(text) - 1);
+    const char cup[] = "\x1b[2;1H";
+    sshterm::feed(cup, sizeof(cup) - 1);
+    const char erase0[] = "\x1b[J";
+    sshterm::feed(erase0, sizeof(erase0) - 1);
+    sshterm::Cell snap[sshterm::kRows][sshterm::kCols];
+    sshterm::snapshot(snap, 0);
+    expect(rowText(snap[0]) == "AAA", "CSI 0J keeps text above cursor");
+    expect(rowText(snap[1]).empty(), "CSI 0J clears cursor line to end");
+
+    sshterm::clear();
+    sshterm::feed(text, sizeof(text) - 1);
+    const char cup2[] = "\x1b[2;2H";
+    sshterm::feed(cup2, sizeof(cup2) - 1);
+    const char erase1[] = "\x1b[1J";
+    sshterm::feed(erase1, sizeof(erase1) - 1);
+    sshterm::snapshot(snap, 0);
+    expect(rowText(snap[0]).empty(), "CSI 1J clears rows above cursor");
+    expect(rowText(snap[1]) == "  B", "CSI 1J clears through cursor only");
+}
+
+void testHugeScroll()
+{
+    sshterm::clear();
+    const char a[] = "X";
+    sshterm::feed(a, sizeof(a) - 1);
+    const char huge[] = "\x1b[999999999S";
+    sshterm::feed(huge, sizeof(huge) - 1);
+    sshterm::Cell snap[sshterm::kRows][sshterm::kCols];
+    sshterm::snapshot(snap, 0);
+    expect(true, "huge CSI S saturates without hanging");
+}
+
 void testHistory()
 {
     sshterm::clear();
@@ -104,8 +141,10 @@ int main()
     testPlainText();
     testSgrColor();
     testUtf8Box();
+    testEraseModes();
+    testHugeScroll();
     testHistory();
     testAlternateScreen();
-    std::printf("%d passed, %d failed\n", 9 - failures, failures);
+    std::printf("%d passed, %d failed\n", 14 - failures, failures);
     return failures == 0 ? 0 : 1;
 }

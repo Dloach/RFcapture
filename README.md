@@ -46,7 +46,7 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；
   - 密码认证；Ed25519 key 代码保留在仓库中，但默认固件关闭；
   - 首次 host key 显示 SHA256 指纹确认；
-  - 编辑页 `, /` 移光标、光标处插入、闪烁 `_`；
+  - 编辑页 `Opt+, /` 移光标、光标处插入、闪烁 `_`；
   - 40×13 终端，ANSI 16 色、UTF-8 回退、64 行历史，`Opt+; .` 翻页；
   - 15 s 超时、30 s keepalive；`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。
   - 使用说明见 [docs/SSH.md](docs/SSH.md)。
@@ -172,7 +172,7 @@ host 测试覆盖 EV1527 / PT2262 解码、基准时间估算、波形质量分�
 ```
 
 需要一个本机 C++17 编译器（g++ / clang++ / MSVC）。脚本也认 `tools/zig/zig.exe`
-和 PATH 上的 `zig`。当前为 **52 项全过**（43 解码/绑定/存储 + 9 SSH 终端）；
+和 PATH 上的 `zig`。当前为 **57 项全过**（43 解码/绑定/存储 + 14 SSH 终端）；
 PlatformIO 的 Xtensa 交叉编译器不能跑这些测试。
 
 ## 合规

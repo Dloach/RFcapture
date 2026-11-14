@@ -20,7 +20,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | 快捷绑定 | `quick.txt` 6 字段（slot/kind/index/icon/color/key）；按 UID/code 的稳定 key 解析，失效显式 `BINDING STALE` |
 | 永久列表撕裂 | P0-2 已改为 blob→count 提交 + 按字节数自愈；`recoverSavedCount()` 有 host 测试 |
 | 同码重采 | P0-3：新波形分数显著更高时自动替换，`BETTER WAVE`；再次 ENTER 可更新永久列表 |
-| host 测试 | **52 项全过**（43 解码/绑定/存储 + 9 SSH 终端；g++ 15.2 / WSL 验证） |
+| host 测试 | **57 项全过**（43 解码/绑定/存储 + 14 SSH 终端；g++ 15.2 / WSL 验证） |
 
 ### 0.1 KEYBOARD 速查
 
@@ -50,10 +50,12 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 - Ed25519：默认固件**关闭**（`SSH_ENABLE_ED25519=0`），profile 只显示
   NAME/HOST/PORT/USER/PASS/CONNECT；代码保留在 `ssh_app.cpp`，把该宏设为 1
   可恢复 TF `/ssh/id_ed25519` 导入与 AUTH 切换。
-- 编辑页支持 `,` / `/` 光标、光标处插入、`BKSP` 删除、闪烁 `_`。
+- 编辑页支持 `Opt+,` / `Opt+/` 光标、光标处插入、`BKSP` 删除、闪烁 `_`；
+  裸 `,` / `/` 现在作为密码/文本字符输入。
 - 终端 40×13：ANSI 16 色、UTF-8 框线回退、64 行历史（`Opt+; .`）；
   15 s 超时、30 s keepalive；SSH task 56 KB，串口每 30 s 打 heap/stack。
-- 终端 40×13，`ssh_terminal` 做基本 VT100（光标/清屏/SGR 忽略/滚动）；
+- 终端 40×13，`ssh_terminal` 做 VT100 子集（ANSI 16 色、J/K、滚动区、
+  插入删除行/字符、UTF-8 ASCII 回退、64 行历史）。
   `Fn+BKSP` 退出会话，`Fn+Q` 关闭。
 - 已知限制：Ed25519 默认关闭、无加密私钥/RSA、无无限自动重连
   （错误页/列表 R 手动重试）、UTF-8 只做 ASCII 回退、ANSI 字符集/鼠标不完整；

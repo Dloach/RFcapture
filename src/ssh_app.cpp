@@ -243,10 +243,19 @@ void loadProfiles()
         snprintf(key, sizeof(key), "key%d", i);
         copyString(profiles[i].keyPath, sizeof(profiles[i].keyPath),
                    p.getString(key, "/spiffs/ssh/id_ed25519"));
+        if (profiles[i].name[0] == 0 && profiles[i].host[0] == 0) {
+            // Torn write: count was already new but this slot never landed.
+            // Compact it away, same policy as wifi_store.
+            for (int j = i; j < n - 1; ++j) profiles[j] = profiles[j + 1];
+            --n;
+            --i;
+            continue;
+        }
         if (profiles[i].name[0] == 0) snprintf(profiles[i].name, sizeof(profiles[i].name), "PROFILE %d", i + 1);
     }
     profileCount = n;
     current      = p.getUChar("current", 0);
+    if (current < 0 || current >= profileCount) current = 0;
     if (current < 0 || current >= profileCount) current = 0;
     p.end();
 }
@@ -255,8 +264,6 @@ void saveProfiles()
 {
     Preferences p;
     if (!p.begin("ssh", false)) return;
-    p.putUChar("count", static_cast<uint8_t>(profileCount));
-    p.putUChar("current", static_cast<uint8_t>(current < 0 ? 0 : current));
     for (int i = 0; i < kMaxProfiles; ++i) {
         char key[16];
         snprintf(key, sizeof(key), "name%d", i);
@@ -274,6 +281,10 @@ void saveProfiles()
         snprintf(key, sizeof(key), "key%d", i);
         p.putString(key, i < profileCount ? profiles[i].keyPath : "");
     }
+    p.putUChar("current", static_cast<uint8_t>(current < 0 ? 0 : current));
+    // Commit count last: a torn write leaves the old count, and loadProfiles()
+    // compacts any empty slot if the new count did land.
+    p.putUChar("count", static_cast<uint8_t>(profileCount));
     p.end();
     Serial.printf("[ssh] profiles saved count=%d current=%d\n", profileCount, current);
 }
@@ -489,7 +500,7 @@ void drawEdit()
         lcd.drawString(line, 6, 94);
     }
 
-    static const Hint h[] = {{"ENT", "save"}, {", /", "cursor"}, {"FN BKSP", "cancel"}};
+    static const Hint h[] = {{"ENT", "save"}, {"OPT , /", "cursor"}, {"FN BKSP", "cancel"}};
     hints(h, 3);
 }
 
@@ -538,7 +549,7 @@ void drawTerminal()
 
     static const uint16_t palette[16] = {
         0x0000, 0xF800, 0x07E0, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF,
-        0x8410, 0xF81F, 0x07FF, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF,
+        0x8410, 0xF800, 0x07E0, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF,
     };
 
     sshterm::Cell snap[sshterm::kRows][sshterm::kCols];
@@ -666,6 +677,10 @@ void sshTask(void*)
         setError(msg);
         goto done;
     }
+    if (sshStop) {
+        sshPhase = 5;
+        goto done;
+    }
 
     {
         const enum ssh_known_hosts_e known = ssh_session_is_known_server(session);
@@ -692,6 +707,10 @@ void sshTask(void*)
             ssh_clean_pubkey_hash(&hash);
             ssh_key_free(serverKey);
 
+            if (sshStop) {
+                sshPhase = 5;
+                goto done;
+            }
             hostKeyDecision = 0;
             sshPhase        = 6;
             while (hostKeyDecision == 0 && !sshStop) vTaskDelay(pdMS_TO_TICKS(50));
@@ -737,10 +756,18 @@ void sshTask(void*)
         setError(msg);
         goto done;
     }
+    if (sshStop) {
+        sshPhase = 5;
+        goto done;
+    }
 
     channel = ssh_channel_new(session);
     if (channel == nullptr || ssh_channel_open_session(channel) != SSH_OK) {
         setError("CHANNEL OPEN FAILED");
+        goto done;
+    }
+    if (sshStop) {
+        sshPhase = 5;
         goto done;
     }
     if (ssh_channel_request_pty_size(channel, "xterm", sshterm::kCols, sshterm::kRows) != SSH_OK) {
@@ -749,6 +776,10 @@ void sshTask(void*)
     }
     if (ssh_channel_request_shell(channel) != SSH_OK) {
         setError("SHELL FAILED");
+        goto done;
+    }
+    if (sshStop) {
+        sshPhase = 5;
         goto done;
     }
 
@@ -836,16 +867,17 @@ bool startSsh()
         return false;
     }
 
+    sshRunning = true;
     const BaseType_t ok =
         xTaskCreatePinnedToCore(sshTask, "ssh", 56 * 1024, nullptr, 5, nullptr, 1);
     if (ok != pdPASS) {
+        sshRunning = false;
         copyCString(note, sizeof(note), "NO MEMORY (ssh task)");
         scr   = Scr::kError;
         dirty = true;
         return false;
     }
 
-    sshRunning = true;
     scr        = Scr::kConnecting;
     dirty      = true;
     return true;
@@ -931,6 +963,7 @@ enum : uint32_t {
 uint32_t readActions()
 {
     uint32_t a = 0;
+    const bool opt = M5Cardputer.Keyboard.keysState().opt;
     for (const auto& pos : M5Cardputer.Keyboard.keyList()) {
         const uint8_t code = static_cast<uint8_t>(M5Cardputer.Keyboard.getKeyValue(pos).value_first);
         switch (code) {
@@ -941,8 +974,8 @@ uint32_t readActions()
             case 0x2A: a |= kDelete; break;
             case 'e': case 'E': a |= kEdit; break;
             case 'd': case 'D': a |= kDelProf; break;
-            case ',': a |= kLeft; break;
-            case '/': a |= kRight; break;
+            case ',': if (opt) a |= kLeft; break;
+            case '/': if (opt) a |= kRight; break;
             case 'k': case 'K': a |= kClear; break;
             case 'r': case 'R': a |= kRetry; break;
             default: break;
@@ -1044,7 +1077,7 @@ void handleEdit(uint32_t pressed)
     bool changed = false;
     for (char c : ks.word) {
         if (c < 32 || c >= 127) continue;
-        if (c == ',' || c == '/') continue;  // cursor movement, not text
+        if (ks.opt && (c == ',' || c == '/')) continue;  // Opt cursor movement
         if (editField == 2 && (c < '0' || c > '9')) continue;
         bool already = false;
         for (char p : prevWord) {

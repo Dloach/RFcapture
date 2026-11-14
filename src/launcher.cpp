@@ -364,7 +364,9 @@ void menuSetup()
     if (!wifiStarted) {
         wifiStarted = true;
         wifistore::begin();
-        if (wifistore::count() > 0) {
+        // A soft return from SETTINGS already has a live station link; do not
+        // drop it just because this is the first menu bring-up in this boot.
+        if (WiFi.status() != WL_CONNECTED && wifistore::count() > 0) {
             const auto* n = wifistore::last();
             if (n != nullptr) {
                 WiFi.mode(WIFI_STA);

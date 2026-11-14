@@ -41,13 +41,26 @@ int parseNum(const char* s, int def)
 {
     if (s[0] == 0) return def;
     int v = 0;
-    for (int i = 0; s[i] >= '0' && s[i] <= '9'; ++i) v = v * 10 + (s[i] - '0');
+    for (int i = 0; s[i] >= '0' && s[i] <= '9'; ++i) {
+        v = v * 10 + (s[i] - '0');
+        if (v > 9999) return 9999;  // saturate: callers clamp to a screen bound
+    }
     return v;
 }
 
 void blankRow(int r)
 {
     for (int c = 0; c < kCols; ++c) screen[r][c] = Cell{' ', 7, 0};
+}
+
+Cell eraseCell()
+{
+    return Cell{' ', 7, curBg};
+}
+
+void eraseRow(int r)
+{
+    for (int c = 0; c < kCols; ++c) screen[r][c] = eraseCell();
 }
 
 void clearLocked()
@@ -82,7 +95,7 @@ void scrollLocked()
     for (int r = scrollTop + 1; r <= scrollBot; ++r) {
         memcpy(screen[r - 1], screen[r], sizeof(screen[r]));
     }
-    blankRow(scrollBot);
+    eraseRow(scrollBot);
     row = scrollBot;
 }
 
@@ -235,51 +248,70 @@ void csiFinalLocked(char final, const char* args)
         if (col < 0) col = 0;
         if (col >= kCols) col = kCols - 1;
     } else if (final == 'J') {
-        if (parseNum(args, 0) == 2 || args[0] == 0) {
-            for (int r = 0; r < kRows; ++r) blankRow(r);
+        const int mode = parseNum(args, 0);
+        if (mode == 2) {
+            for (int r = 0; r < kRows; ++r) eraseRow(r);
+        } else if (mode == 1) {
+            for (int r = 0; r < row; ++r) eraseRow(r);
+            for (int c = 0; c <= col && c < kCols; ++c) screen[row][c] = eraseCell();
         } else {
-            for (int c = col; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
-            for (int r = row + 1; r < kRows; ++r) blankRow(r);
+            for (int c = col; c < kCols; ++c) screen[row][c] = eraseCell();
+            for (int r = row + 1; r < kRows; ++r) eraseRow(r);
         }
     } else if (final == 'K') {
-        if (parseNum(args, 0) == 2) {
-            for (int c = 0; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
+        const int mode = parseNum(args, 0);
+        if (mode == 2) {
+            eraseRow(row);
+        } else if (mode == 1) {
+            for (int c = 0; c <= col && c < kCols; ++c) screen[row][c] = eraseCell();
         } else {
-            for (int c = col; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
+            for (int c = col; c < kCols; ++c) screen[row][c] = eraseCell();
         }
     } else if (final == 'S') {
-        for (int n = parseNum(args, 1); n > 0; --n) scrollLocked();
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kRows) n = kRows;
+        for (; n > 0; --n) scrollLocked();
         row = scrollBot;
         col = 0;
     } else if (final == 'T') {
-        for (int n = parseNum(args, 1); n > 0; --n) {
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kRows) n = kRows;
+        for (; n > 0; --n) {
             for (int r = scrollBot; r > scrollTop; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
-            blankRow(scrollTop);
+            eraseRow(scrollTop);
         }
         row = scrollBot;
         col = 0;
     } else if (final == 'L') {
-        for (int n = parseNum(args, 1); n > 0; --n) {
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kRows) n = kRows;
+        for (; n > 0; --n) {
             for (int r = scrollBot; r > row; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
-            blankRow(row);
+            eraseRow(row);
         }
     } else if (final == 'M') {
-        for (int n = parseNum(args, 1); n > 0; --n) {
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kRows) n = kRows;
+        for (; n > 0; --n) {
             for (int r = row; r < scrollBot; ++r) memcpy(screen[r], screen[r + 1], sizeof(screen[r]));
-            blankRow(scrollBot);
+            eraseRow(scrollBot);
         }
     } else if (final == 'P') {
         int n = parseNum(args, 1);
         if (n < 1) n = 1;
         if (n > kCols - col) n = kCols - col;
         for (int c = col; c < kCols - n; ++c) screen[row][c] = screen[row][c + n];
-        for (int c = kCols - n; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
+        for (int c = kCols - n; c < kCols; ++c) screen[row][c] = eraseCell();
     } else if (final == '@') {
         int n = parseNum(args, 1);
         if (n < 1) n = 1;
         if (n > kCols - col) n = kCols - col;
         for (int c = kCols - 1; c >= col + n; --c) screen[row][c] = screen[row][c - n];
-        for (int c = col; c < col + n; ++c) screen[row][c] = Cell{' ', 7, 0};
+        for (int c = col; c < col + n; ++c) screen[row][c] = eraseCell();
     } else if (final == 'r') {
         int top = 1, bottom = kRows;
         const char* semi = strchr(args, ';');
@@ -455,8 +487,11 @@ int historyCount()
 
 bool takeDirty()
 {
-    bool d = dirty;
-    dirty  = false;
+    bool d;
+    portENTER_CRITICAL(&mux);
+    d     = dirty;
+    dirty = false;
+    portEXIT_CRITICAL(&mux);
     return d;
 }
 

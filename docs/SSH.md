@@ -32,7 +32,7 @@ NAME / HOST / PORT / USER / PASS / CONNECT
 
 编辑字段：
 
-- `,` / `/` 左右移动光标；
+- `Opt+,` / `Opt+/` 左右移动光标；裸 `,` / `/` 作为普通字符输入；
 - `BKSP` 删除光标前字符；
 - 光标处插入；
 - `ENT` 保存，`Fn+BKSP` 取消；
