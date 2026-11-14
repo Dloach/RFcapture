@@ -2,6 +2,7 @@
 
 #include <M5Cardputer.h>
 #include <SD.h>
+#include <Preferences.h>
 
 #include <cstring>
 #include <memory>
@@ -39,6 +40,7 @@ uint32_t samples = 0;
 uint32_t savedBytes = 0;
 int peak = 0;
 int levelPct = 0;
+uint8_t playVolume = 240;
 char status[48] = "ENT record";
 char lastFile[64] = {0};
 File wav;
@@ -102,6 +104,35 @@ const char* baseName(const char* path)
 {
     const char* slash = path ? strrchr(path, '/') : nullptr;
     return slash ? slash + 1 : (path ? path : "");
+}
+
+void loadVolume()
+{
+    Preferences p;
+    if (!p.begin("rec", true)) return;
+    playVolume = p.getUChar("vol", 240);
+    p.end();
+    if (playVolume > 255) playVolume = 255;
+}
+
+void saveVolume()
+{
+    Preferences p;
+    if (!p.begin("rec", false)) return;
+    p.putUChar("vol", playVolume);
+    p.end();
+}
+
+void changeVolume(int delta)
+{
+    int v = static_cast<int>(playVolume) + delta * 16;
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    playVolume = static_cast<uint8_t>(v);
+    saveVolume();
+    M5.Speaker.setVolume(playVolume);
+    snprintf(status, sizeof(status), "VOL %d%%", playVolume * 100 / 255);
+    dirty = true;
 }
 
 void micRelease(void*, void* data, size_t)
@@ -176,6 +207,10 @@ void drawTop()
              static_cast<unsigned long>((samples % kRate) / (kRate / 10)));
     lcd.setTextColor(kText, kBg);
     lcd.drawString(line, 4, 28);
+    char vol[16];
+    snprintf(vol, sizeof(vol), "VOL %d%%", playVolume * 100 / 255);
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawRightString(vol, lcd.width() - 4, 28);
 
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("LEVEL", 4, 41);
@@ -392,6 +427,19 @@ void recordLoop()
     draw();
 }
 
+enum : uint32_t {
+    kBack = 1,
+    kEnter = 2,
+    kPlay = 4,
+    kUp = 8,
+    kDown = 16,
+    kDelete = 32,
+    kVolDown = 64,
+    kVolUp = 128,
+};
+
+uint32_t readActions();
+
 void playSelected()
 {
     if (fileCount == 0) {
@@ -417,21 +465,32 @@ void playSelected()
     f.seek(44);
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.setVolume(240);
+    M5.Speaker.setVolume(playVolume);
     static int16_t block[4096];  // 256 ms chunks: few SD-read gaps
     size_t remaining = bytes - 44;
     snprintf(status, sizeof(status), "PLAYING");
     dirty = true;
     draw();
+    uint32_t localPrev = 0;
     while (remaining > 0) {
+        M5Cardputer.update();
+        const uint32_t localNow = readActions();
+        const uint32_t localPressed = localNow & ~localPrev;
+        localPrev = localNow;
+        if (localPressed & kVolDown) { changeVolume(-1); drawTop(); }
+        if (localPressed & kVolUp) { changeVolume(1); drawTop(); }
         const size_t want = remaining > sizeof(block) ? sizeof(block) : remaining;
         const size_t got = f.read(reinterpret_cast<uint8_t*>(block), want);
         if (got < 2) break;
         M5.Speaker.playRaw(block, got / 2, kRate, false);
         while (M5.Speaker.isPlaying()) {
             M5Cardputer.update();
-            if (M5Cardputer.Keyboard.isKeyPressed('`') ||
-                M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+            const uint32_t nowActions = readActions();
+            const uint32_t nowPressed = nowActions & ~localPrev;
+            localPrev = nowActions;
+            if (nowPressed & kVolDown) { changeVolume(-1); drawTop(); }
+            if (nowPressed & kVolUp) { changeVolume(1); drawTop(); }
+            if (nowPressed & (kBack | kEnter)) {
                 M5.Speaker.stop();
                 remaining = 0;
                 break;
@@ -448,8 +507,6 @@ void playSelected()
     dirty = true;
 }
 
-enum : uint32_t { kBack = 1, kEnter = 2, kPlay = 4, kUp = 8, kDown = 16, kDelete = 32 };
-
 uint32_t readActions()
 {
     uint32_t a = 0;
@@ -461,6 +518,8 @@ uint32_t readActions()
         if (c == ';') a |= kUp;
         if (c == '.') a |= kDown;
         if (c == 'd' || c == 'D') a |= kDelete;
+        if (c == '-') a |= kVolDown;
+        if (c == '=') a |= kVolUp;
     }
     return a;
 }
@@ -479,6 +538,7 @@ void setup()
     lcd.setTextSize(1);
     lcd.setTextWrap(false);
     lcd.fillScreen(kBg);
+    loadVolume();
 
     sdOk = sdmount::ensure(false);
     if (!sdOk) {
@@ -539,6 +599,14 @@ void loop()
     }
     if (pressed & kEnter) {
         startRecording();
+    }
+    if (pressed & kVolDown) {
+        changeVolume(-1);
+        draw();
+    }
+    if (pressed & kVolUp) {
+        changeVolume(1);
+        draw();
     }
     if (pressed & kPlay) {
         playSelected();
