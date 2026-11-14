@@ -29,6 +29,8 @@ enum App : uint8_t {
     kAppNfc    = 2,
     kAppBackup = 3,  // RF signals + NFC cards on the TF card
     kAppKbd    = 4,  // wired / Bluetooth keyboard
+    kAppSettings = 5,  // WiFi settings and future system settings
+    kAppSsh      = 6,  // SSH client over WiFi
 };
 
 /// Which app this boot belongs to (from NVS).

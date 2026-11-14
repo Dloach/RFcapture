@@ -1,12 +1,14 @@
-# Cardputer ADV + CAP.CC1101：RF 采集回放 / NFC 读卡 / USB-BLE 键盘
+# Cardputer ADV + CAP.CC1101：RF / NFC / 键盘 / WiFi / SSH
 
-M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载键盘做四件事：
+M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载键盘做：
 
 - **RF**：采集、保存并重发铁门 / 卷帘门 / 道闸等 OOK 遥控器（EV1527 / PT2262 固定码）；
 - **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）；
-- **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）。
+- **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）；
+- **SETTINGS**：扫描 2.4 GHz WiFi、输密码、保存并开机自动连接；
+- **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端。
 
-系统是 launcher 四功能 + 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 六功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -31,6 +33,15 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - 工作页显示 4×14 键盘映射，按键/修饰键实时高亮；`Opt` = Win/Command；
   - `Fn+1..0` = F1..F10，`Fn+-`/`Fn+=` = F11/F12，`Fn+; . , /` = 方向键，
     `Fn+`` = Esc，`Fn+BKSP` 返回 KEYBOARD 菜单。
+- **SETTINGS → WIFI**
+  - 异步扫描 2.4 GHz AP，密码输入，连接成功后写入 NVS；
+  - 保存最多 5 个网络，启动时自动连上次成功的网络；
+  - `TEST CONNECTION` 用 `example.com:80` 验证 DNS/外网 TCP。
+- **SSH**
+  - 自动使用 SETTINGS 里保存的 WiFi；
+  - HOST / PORT / USER / PASSWORD profile，密码默认保存到 NVS；
+  - 密码认证、首次连接自动记录 host key；
+  - 40×13 终端，`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。
 
 > 实测：315 MHz EV1527 遥控器（T≈500 µs）采集 → 保存 → 回放，铁门正常动作；
 > 门卡 `3C02B611` 的模拟已验证能开门。**码值一样不代表波形一样好**：`q40` 以下
@@ -81,6 +92,11 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 - NFC 扫描：`S` 开始/停止；
 - KEYBOARD 模式页：`ENT` 进入选中模式、`esc` 回 launcher；
 - KEYBOARD 工作页：`Fn+BKSP` 回 KEYBOARD 菜单；`Fn+`` = Esc；`Opt` = Win。
+- launcher：`; .` 上下滚动六项；`ENT` 进入；右侧九宫格照旧。
+- SETTINGS / WIFI：`S` 扫描，`ENT` 选择，密码页 `ENT` 连接、`BKSP` 删除、
+  `Fn+BKSP` 取消；`TEST CONNECTION` 验证外网 TCP。
+- SSH：`; .` 选字段，`ENT` 编辑/连接；终端里 `Fn+; . , /` = 方向键，
+  `Fn+BKSP` 退出，`Fn+Q` 关闭会话。
 
 ## 目录
 
@@ -90,11 +106,15 @@ cardputer/
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
-│   ├── launcher.*              launcher 四功能 + 九宫格
+│   ├── launcher.*              launcher 六功能（滚动）+ 九宫格
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
 │   ├── nfc_app.*               NFC 读卡 / 列表 / 模拟
 │   ├── nfc_cards.*             NFC 卡库（SPIFFS + TF 备份）
 │   ├── kbd_app.*               USB / BLE 键盘 + 映射页
+│   ├── settings_app.*          SETTINGS / WiFi 扫描、连接、测试
+│   ├── wifi_store.*            WiFi 凭据（NVS，最多 5 个）
+│   ├── ssh_app.*               SSH profile / 认证 / 会话
+│   ├── ssh_terminal.*          40×13 VT100 终端缓冲
 │   ├── backup_app.*            BACKUP / RESTORE
 │   ├── bind_picker.*           九宫格绑定的模态选择器
 │   ├── quick_bind.*            九宫格绑定表（SPIFFS /quick.txt）
@@ -120,14 +140,16 @@ cardputer/
     ├── PLAN-fix-2026-11-12.md  修复计划与执行记录
     ├── PLAN-keyboard-next.md   键盘功能的执行计划
     ├── PLAN-wifi-ssh.md        WiFi Settings + SSH 客户端开发计划
+    ├── THIRD-PARTY.md          第三方组件与 LGPL 注意事项
     └── RESEARCH-keyboard.md    键盘调研
 ```
 
 ## 路线图
 
-下一步是 **SETTINGS → WIFI SETTINGS**（扫描、输密码、保存、开机自动连接），
-之后做 **SSH 客户端**。菜单需要先改成可滚动列表；SSH 库/许可证/内存的取舍、
-分阶段任务和验收矩阵见 [docs/PLAN-wifi-ssh.md](docs/PLAN-wifi-ssh.md)。
+WiFi Settings 和 SSH MVP 已落地：扫描/保存/开机自动连接、外网 TCP 测试、
+单 profile 密码 SSH、40×13 终端。后续是 SSH 多 profile、Ed25519 key、
+host key 变更提示、终端 ANSI 补全和滚动历史；详见
+[docs/PLAN-wifi-ssh.md](docs/PLAN-wifi-ssh.md)。
 
 ## 测试
 

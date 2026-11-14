@@ -21,10 +21,12 @@
 #include "launcher.h"
 #include "nfc_app.h"
 #include "rf_config.h"
+#include "settings_app.h"
+#include "ssh_app.h"
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd };
+enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh };
 
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
@@ -84,6 +86,16 @@ void setup()
             kbdapp::setup();
             break;
 
+        case launcher::kAppSettings:
+            g_running = Running::kSettings;
+            settingsapp::setup();
+            break;
+
+        case launcher::kAppSsh:
+            g_running = Running::kSsh;
+            sshapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
@@ -105,6 +117,15 @@ void loop()
             break;
         case Running::kKbd:
             kbdapp::loop();
+            break;
+        case Running::kSettings:
+            if (settingsapp::loop()) {
+                g_running = Running::kMenu;
+                launcher::menuSetup();
+            }
+            break;
+        case Running::kSsh:
+            sshapp::loop();
             break;
         default:
             launcher::menuLoop();

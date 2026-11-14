@@ -2,6 +2,7 @@
 
 #include <M5Cardputer.h>
 #include <Preferences.h>
+#include <WiFi.h>
 #include <esp_system.h>
 
 #include "cc1101.h"
@@ -12,6 +13,7 @@
 #include "rf_replay.h"
 #include "saved_store.h"
 #include "ui_hint.h"
+#include "wifi_store.h"
 
 namespace launcher {
 namespace {
@@ -30,8 +32,20 @@ constexpr uint16_t kWarn   = 0xF800;
 auto& lcd = M5Cardputer.Display;
 
 int sel = 0;
+int menuTop = 0;
 int gridPage = 0;  // 0 = main, 1 = Fn, 2 = Aa/Shift, 3 = Opt
 bool dirty = true;
+bool lastWifiConnected = false;
+bool wifiStarted       = false;
+
+// The launcher list scrolls four rows at a time.  Keep the order here separate
+// from the App numeric values: BACKUP must stay 3 and KEYBOARD 4 because those
+// bytes are already in NVS appboot.
+constexpr int kMenuVisible = 4;
+const char* const kMenuItems[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "BACKUP",
+                                  "SETTINGS", "SSH"};
+constexpr int kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
+const App kMenuApps[] = {kAppRf, kAppNfc, kAppKbd, kAppBackup, kAppSettings, kAppSsh};
 
 char status[32] = {0};  // one-line result of the last quick action
 
@@ -154,6 +168,17 @@ void quickEmulateNfc(const quickbind::Binding& b)
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
+void drawWifiIcon(int x, int y)
+{
+    const bool on = WiFi.status() == WL_CONNECTED;
+    const uint16_t c = on ? kOk : kDim;
+    // Three ascending bars, small enough for the 13 px header.
+    lcd.fillRect(x, y + 5, 2, 4, c);
+    lcd.fillRect(x + 4, y + 3, 2, 6, c);
+    lcd.fillRect(x + 8, y + 1, 2, 8, c);
+    if (!on) lcd.drawLine(x - 1, y + 9, x + 11, y, kWarn);
+}
+
 void draw()
 {
     lcd.fillScreen(kBg);
@@ -163,24 +188,37 @@ void draw()
     lcd.setTextColor(kAccent, kHead);
     lcd.drawString(quickbind::pageName(gridPage), 80, 2);
 
+    drawWifiIcon(190, 2);
+
     const int level = M5.Power.getBatteryLevel();
     char bat[12];
     snprintf(bat, sizeof(bat), level < 0 ? "--" : "%d%%", level);
     lcd.setTextColor(kText, kHead);
     lcd.drawRightString(bat, lcd.width() - 3, 2);
 
-    // Left: the four features, spread over the body.  Highlight is colour + bar
-    // only, no ">" prefix: at text size 2 the marker pushed "NFC TOOLS" to 120 px
-    // wide, spilling over the divider onto the grid.
-    const char* items[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "BACKUP"};
+    // Left: a four-row scrolling window over the feature list.  Highlight is
+    // colour + bar only, no ">" prefix: at text size 2 the marker pushed
+    // "NFC TOOLS" to 120 px wide, spilling over the divider onto the grid.
     lcd.setTextSize(2);
-    for (int i = 0; i < 4; ++i) {
-        const int y = 22 + i * 22;
-        if (i == sel) lcd.fillRect(2, y - 4, 112, 20, kBar);
-        lcd.setTextColor(i == sel ? kAccent : kText, i == sel ? kBar : kBg);
-        lcd.drawString(items[i], 8, y);
+    for (int row = 0; row < kMenuVisible; ++row) {
+        const int idx = menuTop + row;
+        if (idx >= kMenuItemCount) break;
+        const int y = 22 + row * 22;
+        if (idx == sel) lcd.fillRect(2, y - 4, 112, 20, kBar);
+        lcd.setTextColor(idx == sel ? kAccent : kText, idx == sel ? kBar : kBg);
+        lcd.drawString(kMenuItems[idx], 8, y);
     }
     lcd.setTextSize(1);
+
+    // Scroll affordances at the far left edge, clear of the text.
+    if (menuTop > 0) {
+        lcd.setTextColor(kAccent, kBg);
+        lcd.drawString("^", 108, 14);
+    }
+    if (menuTop + kMenuVisible < kMenuItemCount) {
+        lcd.setTextColor(kAccent, kBg);
+        lcd.drawString("v", 108, 94);
+    }
 
     if (status[0]) {
         lcd.setTextColor(kDim, kBg);
@@ -219,7 +257,8 @@ constexpr int kBootBarY = 86;
 constexpr int kBootBarW = 192;
 constexpr int kBootBarH = 14;
 
-const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD"};
+const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD", "SETTINGS",
+                                 "SSH"};
 
 void drawBootBase(App app)
 {
@@ -228,7 +267,7 @@ void drawBootBase(App app)
     lcd.setTextColor(kText, kHead);
     lcd.drawString("CARDPUTER", 3, 2);
 
-    const char* name = kBootName[app <= kAppKbd ? app : 0];
+    const char* name = kBootName[app <= kAppSsh ? app : 0];
     lcd.setTextSize(2);
     lcd.setTextColor(kAccent, kBg);
     lcd.drawString(name, (lcd.width() - lcd.textWidth(name)) / 2, 52);
@@ -269,7 +308,7 @@ App currentApp()
     if (!p.begin(kNs, true)) return kAppMenu;
     const uint8_t v = p.getUChar("app", kAppMenu);
     p.end();
-    return v <= kAppKbd ? static_cast<App>(v) : kAppMenu;
+    return v <= kAppSsh ? static_cast<App>(v) : kAppMenu;
 }
 
 void rebootInto(App app)
@@ -319,6 +358,25 @@ void menuSetup()
     quickbind::load();
     rfSetupIfBound();
 
+    // Attach the saved WiFi network once per boot, in the background.  The
+    // header icon updates when it lands; SETTINGS is still where credentials
+    // are changed.  Do not re-run this when SETTINGS returns without a reboot.
+    if (!wifiStarted) {
+        wifiStarted = true;
+        wifistore::begin();
+        if (wifistore::count() > 0) {
+            const auto* n = wifistore::last();
+            if (n != nullptr) {
+                WiFi.mode(WIFI_STA);
+                WiFi.persistent(false);
+                WiFi.setAutoReconnect(true);
+                WiFi.begin(n->ssid, n->pass);
+                Serial.printf("[launcher] wifi auto-connect '%s'\n", n->ssid);
+            }
+        }
+    }
+
+    lastWifiConnected = WiFi.status() == WL_CONNECTED;
     dirty = true;
     draw();
 }
@@ -326,6 +384,18 @@ void menuSetup()
 void menuLoop()
 {
     M5Cardputer.update();
+
+    // The WiFi stack may outlive SETTINGS when the user returns without a
+    // reboot; keep the header icon honest while sitting on the launcher.
+    static uint32_t lastWifiPoll = 0;
+    if (millis() - lastWifiPoll >= 1000) {
+        lastWifiPoll = millis();
+        const bool now = WiFi.status() == WL_CONNECTED;
+        if (now != lastWifiConnected) {
+            lastWifiConnected = now;
+            dirty            = true;
+        }
+    }
 
     // Fn / Aa / Opt select grid pages 1 / 2 / 3 while held.  MAIN is the
     // default page when no modifier is down.
@@ -360,18 +430,20 @@ void menuLoop()
     prevSlot               = quickSlot;
 
     if (pressed & (1u << 0)) {
-        sel    = (sel + 3) % 4;  // up, wrapping
-        dirty  = true;
+        sel     = (sel + kMenuItemCount - 1) % kMenuItemCount;  // up, wrapping
+        dirty   = true;
     }
     if (pressed & (1u << 1)) {
-        sel    = (sel + 1) % 4;  // down, wrapping
-        dirty  = true;
+        sel     = (sel + 1) % kMenuItemCount;  // down, wrapping
+        dirty   = true;
     }
+    if (sel < menuTop) menuTop = sel;
+    if (sel >= menuTop + kMenuVisible) menuTop = sel - kMenuVisible + 1;
+
     if (pressed & (1u << 2)) {
-        // does not return.  Keep BACKUP's numeric App value at 3; the menu
-        // order is independent of the NVS appboot values.
-        static const App kMenuApp[] = {kAppRf, kAppNfc, kAppKbd, kAppBackup};
-        rebootInto(kMenuApp[sel]);
+        // does not return.  Keep the App numeric values stable; the menu order
+        // is independent of the NVS appboot values.
+        rebootInto(kMenuApps[sel]);
     }
 
     if (slotPressed >= 0) {

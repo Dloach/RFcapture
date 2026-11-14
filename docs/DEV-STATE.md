@@ -1,4 +1,4 @@
-# 开发状态交接（最后更新 2026-11-12）
+# 开发状态交接（最后更新 2026-11-14）
 
 换机器继续开发前记录。**代码在 NAS 上，不在任何 Qoder 会话目录里**：
 macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\cardputer`——同一个目录，别另存一份。
@@ -8,9 +8,11 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 四功能 **RF TOOLS / NFC TOOLS / KEYBOARD / BACKUP** + 右侧 3×3 九宫格；每个功能一次重启 |
+| 功能结构 | launcher 六功能 **RF TOOLS / NFC TOOLS / KEYBOARD / BACKUP / SETTINGS / SSH**，左侧 4 行滚动 + 右侧 3×3 九宫格；每个功能一次重启 |
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
+| SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |
+| SSH | LibSSH-ESP32 5.10.0（LGPL-2.1），单 profile 密码认证，40×13 终端；已实测一次登录成功 |
 | NFC × TF 共存 | **已解决**，见 §7.1：挂 SD 前对 ST25R3916 发 `CMD_SET_DEFAULT`，不要再打 G3 脉冲 |
 | NFC 模拟配方 | **§14.2 是唯一权威**；§13.6 是首次成功记录，§13.5 是已被推翻的历史（当时判定“做不到”） |
 | NFC 实验代际 | `nfc_spike/nfc_emu/nfc_example/nfc_store` 已在 **v1.1.0** 删除；历史见 tag `archive-nfc-spikes-2026-11-12` |
@@ -28,6 +30,21 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 - 工作页显示 4×14 映射并高亮按下键；`Opt` = Win/Command；
   `Fn+1..0`/`Fn+-`/`Fn+=` = F1..F12；`Fn+; . , /` = 方向键；`Fn+\`` = Esc。
 - BLE 重连：连接时强制 CCCD 通知 + `ESP_BLE_SEC_ENCRYPT` + 每秒补发当前报文。
+
+### 0.2 WiFi / SSH 速查
+
+- WiFi 凭据在 NVS `wifi`（最多 5 个，`count/last/ssidN/passN`）；
+  `settings_app` 扫描/密码/连接，`TEST CONNECTION` 连 `example.com:80`。
+- launcher 启动会自动连 `last` 网络；从 SETTINGS 按 `esc` **不重启**回 launcher，
+  WiFi 栈继续运行，header 右侧三格图标显示状态。
+- SSH 依赖 `LibSSH-ESP32@5.10.0`（LGPL-2.1，`platformio.ini` 固定 zip tag）；
+  `ssh_app` 使用 56 KB FreeRTOS task，不能塞进 Arduino loop 栈。
+- SSH profile 在 NVS `ssh`（host/port/user/pass，密码默认保存）;
+  known_hosts 在 SPIFFS `/spiffs/ssh/known_hosts`，首次连接自动接受并写入。
+- 终端 40×13，`ssh_terminal` 做基本 VT100（光标/清屏/SGR 忽略/滚动）；
+  `Fn+BKSP` 退出会话，`Fn+Q` 关闭。
+- 已知限制：单 profile、无 Ed25519 key、host key 变更只报错不交互确认、
+  UTF-8/框线只做 ASCII 回退；SSH/WiFi 密码均为 NVS 明文。
 
 > 下面 §1–§14 是历史记录，按时间保留；与 §0 冲突时以 §0 和最新代码为准。
 > `retry/` 是独立参考工程，源码仍在 git 中；不要在出货固件里引用它。
