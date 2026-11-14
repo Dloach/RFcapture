@@ -35,6 +35,8 @@ enum App : uint8_t {
     kAppBadUsb   = 8,  // DuckyScript over USB HID
     kAppUsbDisk  = 9,  // TF card as USB MSC drive
     kAppRfLab    = 10, // spectrum / sub import / generator / modulation lab
+    kAppWeb      = 11, // WiFi HTTP file manager
+    kAppRec      = 12, // microphone WAV recorder
 };
 
 /// Which app this boot belongs to (from NVS).

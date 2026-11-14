@@ -28,12 +28,16 @@
 #include "ssh_app.h"
 #include "ui_prefs.h"
 #include "usbdisk_app.h"
+#include "web_app.h"
+#include "rec_app.h"
 #include <USB.h>
+#include <USBCDC.h>
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk };
+enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb, kRec };
 
+USBCDC usbSerial(0);
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
 
@@ -41,9 +45,9 @@ App* g_rf         = nullptr;
 
 void setup()
 {
-    // Register CDC before any app calls USB.begin().  CDC_ON_BOOT is 0 so the
-    // core does not do this for us; without it a launcher-only boot enumerates
-    // HID but no COM port, and a wired flash cannot find the board.
+    // Register the USB CDC interface explicitly.  CDC_ON_BOOT is 0 so the
+    // core does not create one; Serial is UART in that configuration.
+    usbSerial.begin(115200);
     Serial.begin(115200);
 
     // Deselect every device on the shared SPI bus (SCK 40 / MOSI 14 / MISO 39)
@@ -127,6 +131,16 @@ void setup()
             usbdiskapp::setup();
             break;
 
+        case launcher::kAppWeb:
+            g_running = Running::kWeb;
+            webapp::setup();
+            break;
+
+        case launcher::kAppRec:
+            g_running = Running::kRec;
+            recapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
@@ -175,6 +189,12 @@ void loop()
             break;
         case Running::kUsbDisk:
             usbdiskapp::loop();
+            break;
+        case Running::kWeb:
+            webapp::loop();
+            break;
+        case Running::kRec:
+            recapp::loop();
             break;
         default:
             launcher::menuLoop();
