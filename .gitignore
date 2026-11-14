@@ -31,3 +31,4 @@ docs/build-*.log
 # compact, verified record of the old emulation path; its .pio/ build tree is
 # already covered by the global rule above.
 docs/ota-*.log
+docs/flash-*.log
