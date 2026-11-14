@@ -77,6 +77,25 @@ void testHistory()
     expect(rowText(snap[0]).size() > 0, "history snapshot offset 1 non-empty");
 }
 
+void testAlternateScreen()
+{
+    sshterm::clear();
+    const char main[] = "MAIN";
+    sshterm::feed(main, sizeof(main) - 1);
+    const char enter[] = "\x1b[?1049h";
+    sshterm::feed(enter, sizeof(enter) - 1);
+    const char alt[] = "ALT";
+    sshterm::feed(alt, sizeof(alt) - 1);
+    sshterm::Cell snap[sshterm::kRows][sshterm::kCols];
+    sshterm::snapshot(snap, 0);
+    expect(rowText(snap[0]) == "ALT", "1049h enters alternate screen");
+
+    const char leave[] = "\x1b[?1049l";
+    sshterm::feed(leave, sizeof(leave) - 1);
+    sshterm::snapshot(snap, 0);
+    expect(rowText(snap[0]) == "MAIN", "1049l restores main screen");
+}
+
 }  // namespace
 
 int main()
@@ -86,6 +105,7 @@ int main()
     testSgrColor();
     testUtf8Box();
     testHistory();
-    std::printf("%d passed, %d failed\n", 7 - failures, failures);
+    testAlternateScreen();
+    std::printf("%d passed, %d failed\n", 9 - failures, failures);
     return failures == 0 ? 0 : 1;
 }

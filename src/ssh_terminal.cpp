@@ -8,7 +8,9 @@ namespace {
 constexpr int kHistoryRows = 64;
 
 Cell screen[kRows][kCols];
+Cell saved[kRows][kCols];
 Cell history[kHistoryRows][kCols];
+bool altActive  = false;
 int histCount    = 0;
 int historyNext  = 0;
 int row          = 0;
@@ -52,8 +54,9 @@ void clearLocked()
     curFg    = 7;
     curBg    = 0;
     reverse  = false;
-    histCount = 0;
+    histCount    = 0;
     historyNext  = 0;
+    altActive    = false;
     utf8Need     = 0;
     utf8Code     = 0;
 }
@@ -244,11 +247,18 @@ void csiFinalLocked(char final, const char* args)
     } else if (final == 'm') {
         applySgrLocked(args);
     } else if ((final == 'h' || final == 'l') && strstr(args, "1049") != nullptr) {
-        // Alternate screen: clear both directions.  A full saved main screen is
-        // not worth the RAM on this panel.
-        for (int r = 0; r < kRows; ++r) blankRow(r);
-        row = 0;
-        col = 0;
+        if (final == 'h' && !altActive) {
+            memcpy(saved, screen, sizeof(saved));
+            altActive = true;
+            for (int r = 0; r < kRows; ++r) blankRow(r);
+            row = 0;
+            col = 0;
+        } else if (final == 'l' && altActive) {
+            memcpy(screen, saved, sizeof(screen));
+            altActive = false;
+            row       = 0;
+            col       = 0;
+        }
     }
 }
 
