@@ -92,6 +92,7 @@ volatile bool sshRunning = false;
 volatile bool sshStop = false;
 char sshError[64] = {0};
 QueueHandle_t keyQ = nullptr;
+bool rxDumped = false;
 
 char connectHost[64] = {0};
 char connectUser[32] = {0};
@@ -563,8 +564,13 @@ void drawTerminal()
             const uint16_t bg = palette[cell.bg & 15];
             const int x = c * 6;
             if (bg != kBg) lcd.fillRect(x, y, 6, 8, bg);
+            // drawString() is used instead of drawChar(): the latter rendered
+            // high/control cell bytes as extended font glyphs on this panel.
+            char one[2];
+            one[0] = (cell.ch >= 32 && cell.ch <= 126) ? cell.ch : ' ';
+            one[1] = 0;
             lcd.setTextColor(fg, bg);
-            lcd.drawChar(x, y, cell.ch);
+            lcd.drawString(one, x, y);
         }
     }
 
@@ -836,6 +842,15 @@ void sshTask(void*)
         }
         const int n = ssh_channel_read_nonblocking(channel, buf, sizeof(buf), 0);
         if (n > 0) {
+            if (!rxDumped) {
+                rxDumped = true;
+                const int dump = n < 128 ? n : 128;
+                Serial.printf("[ssh] first RX %d bytes:", n);
+                for (int i = 0; i < dump; ++i) {
+                    Serial.printf(" %02X", static_cast<unsigned char>(buf[i]));
+                }
+                Serial.println();
+            }
             sshterm::feed(buf, n);
         } else if (n < 0 && n != SSH_AGAIN) {
             Serial.printf("[ssh] read error %d: %s\n", n, ssh_get_error(session));
@@ -895,6 +910,7 @@ bool startSsh()
     sshStop     = false;
     sshPhase    = 1;
     hostKeyDecision = 0;
+    rxDumped    = false;
     sshterm::clear();
 
     if (keyQ == nullptr) keyQ = xQueueCreate(128, sizeof(uint8_t));
