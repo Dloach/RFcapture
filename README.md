@@ -37,6 +37,10 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - 异步扫描 2.4 GHz AP，密码输入，连接成功后写入 NVS；
   - 保存最多 5 个网络，启动时自动连上次成功的网络；
   - `TEST CONNECTION` 用 `example.com:80` 验证 DNS/外网 TCP。
+- **SETTINGS → OTA UPDATE**
+  - 基于 ArduinoOTA 的无线烧录，`cardputer.local:3232`，密码 `cardputer-ota`；
+  - 第一次仍需 USB，之后 `pio run -e cardputer-ota -t upload`；
+  - 详细步骤见 [docs/OTA.md](docs/OTA.md)。
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
   - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；
@@ -144,7 +148,8 @@ cardputer/
     ├── PLAN-fix-2026-11-12.md  修复计划与执行记录
     ├── PLAN-keyboard-next.md   键盘功能的执行计划
     ├── PLAN-wifi-ssh.md        WiFi Settings + SSH 客户端开发计划
-    ├── SSH.md                  SSH profile / host key / key 导入 / 终端说明
+    ├── SSH.md                  SSH profile / host key / 终端说明
+    ├── OTA.md                  无线烧录步骤与故障排查
     ├── THIRD-PARTY.md          第三方组件与 LGPL 注意事项
     └── RESEARCH-keyboard.md    键盘调研
 ```

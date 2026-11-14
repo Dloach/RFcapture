@@ -1,5 +1,6 @@
 #include "settings_app.h"
 
+#include <ArduinoOTA.h>
 #include <M5Cardputer.h>
 #include <WiFi.h>
 
@@ -35,6 +36,7 @@ enum class Scr : uint8_t {
     kConnecting,
     kSaved,
     kTest,
+    kOta,
 };
 Scr scr = Scr::kSettings;
 bool dirty = true;
@@ -48,6 +50,25 @@ int savedTop    = 0;
 
 char statusMsg[48] = {0};
 char testResult[32] = {0};
+
+// OTA uses ArduinoOTA over the same station link.  The password must match the
+// --auth flag in the cardputer-ota PlatformIO environment.
+constexpr char kOtaHostname[] = "cardputer";
+constexpr char kOtaPassword[] = "cardputer-ota";
+bool otaStarted  = false;
+volatile bool otaUploading = false;
+volatile int otaPercent    = 0;
+char otaStatus[40] = "IDLE";
+
+enum : uint32_t {
+    kUp     = 1u << 0,
+    kDown   = 1u << 1,
+    kEnter  = 1u << 2,
+    kBack   = 1u << 3,
+    kDelete = 1u << 4,
+    kScan   = 1u << 5,
+    kForget = 1u << 6,
+};
 
 struct ScanItem {
     char ssid[wifistore::kSsidMax + 1];
@@ -128,9 +149,9 @@ void drawSettings()
     lcd.fillScreen(kBg);
     header("SETTINGS");
 
-    const char* items[] = {"WIFI SETTINGS"};
+    const char* items[] = {"WIFI SETTINGS", "OTA UPDATE"};
     lcd.setTextSize(2);
-    for (int i = 0; i < 1; ++i) {
+    for (int i = 0; i < 2; ++i) {
         const int y = 30 + i * 28;
         if (i == settingsSel) lcd.fillRect(4, y - 4, lcd.width() - 8, 22, kBar);
         lcd.setTextColor(i == settingsSel ? kAccent : kText, i == settingsSel ? kBar : kBg);
@@ -139,8 +160,13 @@ void drawSettings()
     lcd.setTextSize(1);
 
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 72);
-    lcd.drawString("Saved networks auto-connect on boot.", 6, 86);
+    if (settingsSel == 0) {
+        lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 72);
+        lcd.drawString("Saved networks auto-connect on boot.", 6, 86);
+    } else {
+        lcd.drawString("Wireless flash from PlatformIO.", 6, 72);
+        lcd.drawString("HOST cardputer.local   PORT 3232", 6, 86);
+    }
 
     static const Hint h[] = {{"ENT", "open"}, {"esc", "back"}};
     hints(h, 2);
@@ -350,6 +376,95 @@ void drawSaved()
     hints(h, 3);
 }
 
+void startOta()
+{
+    if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+    ArduinoOTA.setHostname(kOtaHostname);
+    ArduinoOTA.setPassword(kOtaPassword);
+    ArduinoOTA.setPort(3232);
+    ArduinoOTA.onStart([]() {
+        otaUploading = true;
+        otaPercent   = 0;
+        snprintf(otaStatus, sizeof(otaStatus), "UPLOADING");
+        dirty = true;
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        otaPercent = total ? static_cast<int>(progress * 100 / total) : 0;
+        dirty      = true;
+    });
+    ArduinoOTA.onEnd([]() {
+        otaUploading = false;
+        otaPercent   = 100;
+        snprintf(otaStatus, sizeof(otaStatus), "DONE - REBOOTING");
+        dirty = true;
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        otaUploading = false;
+        snprintf(otaStatus, sizeof(otaStatus), "ERROR %d", static_cast<int>(error));
+        dirty = true;
+    });
+    ArduinoOTA.begin();
+    otaStarted = true;
+    snprintf(otaStatus, sizeof(otaStatus), "READY");
+    Serial.printf("[ota] ready host=%s.local ip=%s\n", kOtaHostname,
+                  WiFi.localIP().toString().c_str());
+    dirty = true;
+}
+
+void drawOta()
+{
+    lcd.fillScreen(kBg);
+    header("OTA UPDATE");
+
+    const bool wifi = WiFi.status() == WL_CONNECTED;
+    lcd.setTextColor(wifi ? kOk : kWarn, kBg);
+    lcd.drawString(wifi ? "WIFI CONNECTED" : "WIFI REQUIRED", 6, 18);
+
+    if (wifi) {
+        lcd.setTextColor(kText, kBg);
+        lcd.drawString(WiFi.localIP().toString().c_str(), 6, 32);
+        lcd.setTextColor(kDim, kBg);
+        lcd.drawString(WiFi.SSID().c_str(), 6, 44);
+    }
+
+    lcd.setTextColor(otaUploading ? kAccent : kText, kBg);
+    lcd.drawString(otaStatus, 6, 60);
+    if (otaUploading || otaPercent > 0) {
+        lcd.drawRect(6, 72, 228, 10, kDim);
+        lcd.fillRect(7, 73, 226 * otaPercent / 100, 8, kOk);
+    }
+
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawString("HOST cardputer.local", 6, 84);
+    lcd.drawString("PORT 3232   AUTH ON", 6, 94);
+    lcd.drawString("Keep this page open while flashing.", 6, 104);
+
+    static const Hint h[] = {{"esc", "back"}};
+    hints(h, 1);
+}
+
+void enterOta()
+{
+    otaPercent = 0;
+    otaUploading = false;
+    snprintf(otaStatus, sizeof(otaStatus), "WAITING FOR WIFI");
+    scr   = Scr::kOta;
+    dirty = true;
+    if (WiFi.status() == WL_CONNECTED) startOta();
+}
+
+void handleOta(uint32_t pressed)
+{
+    if (pressed & kBack && !otaUploading) {
+        if (otaStarted) {
+            ArduinoOTA.end();
+            otaStarted = false;
+        }
+        scr   = Scr::kSettings;
+        dirty = true;
+    }
+}
+
 void drawCurrent()
 {
     switch (scr) {
@@ -360,6 +475,7 @@ void drawCurrent()
         case Scr::kConnecting: drawConnecting(); break;
         case Scr::kSaved: drawSaved(); break;
         case Scr::kTest: drawTest(); break;
+        case Scr::kOta: drawOta(); break;
     }
 }
 
@@ -579,16 +695,6 @@ void cancelConnect()
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
-enum : uint32_t {
-    kUp     = 1u << 0,
-    kDown   = 1u << 1,
-    kEnter  = 1u << 2,
-    kBack   = 1u << 3,
-    kDelete = 1u << 4,
-    kScan   = 1u << 5,
-    kForget = 1u << 6,
-};
-
 uint32_t readActions()
 {
     uint32_t a = 0;
@@ -888,6 +994,16 @@ bool loop()
     pollScan();
     pollConnect();
 
+    if (scr == Scr::kOta) {
+        if (WiFi.status() == WL_CONNECTED && !otaStarted) startOta();
+        if (otaStarted) ArduinoOTA.handle();
+        static uint32_t lastOtaDraw = 0;
+        if (otaUploading && millis() - lastOtaDraw >= 100) {
+            lastOtaDraw = millis();
+            dirty       = true;
+        }
+    }
+
     if (forgetArmed && millis() - forgetAt > 2000) {
         forgetArmed = false;
         if (strcmp(statusMsg, "PRESS D AGAIN") == 0) statusMsg[0] = 0;
@@ -906,9 +1022,21 @@ bool loop()
                 exitRequested = true;
                 return true;
             }
-            if (pressed & kEnter) {
-                enterWifi();
+            if (pressed & kUp) {
+                settingsSel = (settingsSel + 1) % 2;
+                dirty       = true;
             }
+            if (pressed & kDown) {
+                settingsSel = (settingsSel + 1) % 2;
+                dirty       = true;
+            }
+            if (pressed & kEnter) {
+                if (settingsSel == 0) enterWifi();
+                else enterOta();
+            }
+            break;
+        case Scr::kOta:
+            handleOta(pressed);
             break;
         case Scr::kWifi:
             handleWifiPage(pressed);

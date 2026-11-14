@@ -12,6 +12,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |
+| SETTINGS / OTA | ArduinoOTA，页面停在 `SETTINGS → OTA UPDATE` 时可用 `pio run -e cardputer-ota -t upload`；密码 `cardputer-ota` |
 | SSH | LibSSH-ESP32 5.10.0（LGPL-2.1），最多 4 个 profile，密码认证、host key 指纹确认、40×13 终端；Ed25519 代码保留但默认关闭 |
 | NFC × TF 共存 | **已解决**，见 §7.1：挂 SD 前对 ST25R3916 发 `CMD_SET_DEFAULT`，不要再打 G3 脉冲 |
 | NFC 模拟配方 | **§14.2 是唯一权威**；§13.6 是首次成功记录，§13.5 是已被推翻的历史（当时判定“做不到”） |
@@ -35,6 +36,8 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 - WiFi 凭据在 NVS `wifi`（最多 5 个，`count/last/ssidN/passN`）；
   `settings_app` 扫描/密码/连接，`TEST CONNECTION` 连 `example.com:80`。
+- OTA：`SETTINGS → OTA UPDATE` 启动 ArduinoOTA（`cardputer.local:3232`，
+  `--auth=cardputer-ota`）；页面必须保持打开。NVS/SPIFFS 保留，app 分区双槽。
 - launcher 启动会自动连 `last` 网络；从 SETTINGS 按 `esc` **不重启**回 launcher，
   WiFi 栈继续运行，header 右侧三格图标显示状态。
 - SSH 依赖 `LibSSH-ESP32@5.10.0`（LGPL-2.1，`platformio.ini` 固定 zip tag）；
