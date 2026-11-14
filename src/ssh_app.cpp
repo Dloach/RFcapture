@@ -1,8 +1,13 @@
 #include "ssh_app.h"
 
+// Optional: set to 1 to compile the TF-imported Ed25519 key path back into the
+// UI and authentication flow.  The code stays in the repository either way.
+#ifndef SSH_ENABLE_ED25519
+#define SSH_ENABLE_ED25519 0
+#endif
+
 #include <M5Cardputer.h>
 #include <Preferences.h>
-#include <SD.h>
 #include <SPIFFS.h>
 #include <WiFi.h>
 
@@ -13,10 +18,14 @@
 #include <libssh/libssh.h>
 #include <libssh/server.h>
 
+#if SSH_ENABLE_ED25519
+#include <SD.h>
+#include "sd_mount.h"
+#endif
+
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
-#include "sd_mount.h"
 #include "ssh_terminal.h"
 #include "ui_hint.h"
 #include "wifi_store.h"
@@ -328,8 +337,13 @@ void drawList()
         lcd.drawString(line, 6, 104);
     }
 
+#if SSH_ENABLE_ED25519
     static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"K", "key"}, {"esc", "back"}};
     hints(h, 5);
+#else
+    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"esc", "back"}};
+    hints(h, 4);
+#endif
 }
 
 void drawProfile()
@@ -346,7 +360,11 @@ void drawProfile()
         return;
     }
 
+#if SSH_ENABLE_ED25519
     const int rows = 7;
+#else
+    const int rows = 6;
+#endif
     for (int i = 0; i < rows; ++i) {
         const int y = 20 + i * 12;
         if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 11, kBar);
@@ -373,6 +391,7 @@ void drawProfile()
             char val[30];
             snprintf(val, sizeof(val), "%.26s", p->user[0] ? p->user : "(empty)");
             lcd.drawString(val, 58, y);
+#if SSH_ENABLE_ED25519
         } else if (i == 4) {
             lcd.drawString("AUTH", 6, y);
             lcd.drawString(p->auth == 1 ? "ED25519 KEY" : "PASSWORD", 58, y);
@@ -396,6 +415,23 @@ void drawProfile()
             lcd.setTextColor(kDim, bg);
             lcd.drawString("ENTER", 80, y);
         }
+#else
+        } else if (i == 4) {
+            char stars[24];
+            const int n = strlen(p->pass);
+            const int show = n < 20 ? n : 20;
+            for (int k = 0; k < show; ++k) stars[k] = '*';
+            if (show == 20) stars[19] = '+';
+            stars[show] = 0;
+            lcd.drawString("PASS", 6, y);
+            lcd.drawString(p->pass[0] ? stars : "(empty)", 58, y);
+        } else {
+            lcd.setTextColor(kOk, bg);
+            lcd.drawString("CONNECT", 6, y);
+            lcd.setTextColor(kDim, bg);
+            lcd.drawString("ENTER", 80, y);
+        }
+#endif
     }
 
     static const Hint h[] = {{"; .", "move"}, {"ENT", "edit/connect"}, {"esc", "list"}};
@@ -431,8 +467,13 @@ void drawEditLine()
 void drawEdit()
 {
     lcd.fillScreen(kBg);
+#if SSH_ENABLE_ED25519
     const char* titles[] = {"EDIT NAME", "EDIT HOST", "EDIT PORT", "EDIT USER",
                             "EDIT PASSWORD", "EDIT KEY PATH"};
+#else
+    const char* titles[] = {"EDIT NAME", "EDIT HOST", "EDIT PORT", "EDIT USER",
+                            "EDIT PASSWORD"};
+#endif
     header(titles[editField]);
     drawEditLine();
 
@@ -673,6 +714,7 @@ void sshTask(void*)
     }
 
     sshPhase = 2;
+#if SSH_ENABLE_ED25519
     if (connectAuth == 1) {
         ssh_key key = nullptr;
         if (ssh_pki_import_privkey_file(connectKeyPath, nullptr, nullptr, nullptr, &key) != SSH_OK) {
@@ -687,7 +729,9 @@ void sshTask(void*)
             setError(msg);
             goto done;
         }
-    } else if (ssh_userauth_password(session, nullptr, connectPass) != SSH_AUTH_SUCCESS) {
+    } else
+#endif
+    if (ssh_userauth_password(session, nullptr, connectPass) != SSH_AUTH_SUCCESS) {
         char msg[48];
         snprintf(msg, sizeof(msg), "AUTH: %.30s", ssh_get_error(session));
         setError(msg);
@@ -773,9 +817,11 @@ bool startSsh()
     copyCString(connectHost, sizeof(connectHost), p->host);
     copyCString(connectUser, sizeof(connectUser), p->user);
     copyCString(connectPass, sizeof(connectPass), p->pass);
-    copyCString(connectKeyPath, sizeof(connectKeyPath), p->keyPath);
     connectPort = p->port;
+#if SSH_ENABLE_ED25519
+    copyCString(connectKeyPath, sizeof(connectKeyPath), p->keyPath);
     connectAuth = p->auth;
+#endif
     sshError[0] = 0;
     sshStop     = false;
     sshPhase    = 1;
@@ -932,8 +978,12 @@ void beginEdit(int field)
         const char* src = field == 0 ? p->name
                           : field == 1 ? p->host
                           : field == 3 ? p->user
+#if SSH_ENABLE_ED25519
                           : field == 4 ? p->pass
                                        : p->keyPath;
+#else
+                          : p->pass;
+#endif
         copyCString(editBuf, sizeof(editBuf), src);
     }
     editLen = strlen(editBuf);
@@ -972,8 +1022,10 @@ void finishEdit()
         copyCString(p->user, sizeof(p->user), editBuf);
     } else if (editField == 4) {
         copyCString(p->pass, sizeof(p->pass), editBuf);
+#if SSH_ENABLE_ED25519
     } else {
         copyCString(p->keyPath, sizeof(p->keyPath), editBuf);
+#endif
     }
     saveProfiles();
     scr   = Scr::kProfile;
@@ -1043,6 +1095,7 @@ void handleEdit(uint32_t pressed)
     prevEnter = ks.enter;
 }
 
+#if SSH_ENABLE_ED25519
 void importKeyFromSd()
 {
     if (!sdmount::ensure()) {
@@ -1102,6 +1155,7 @@ void importKeyFromSd()
     Serial.println("[ssh] imported /ssh/id_ed25519 from TF");
     dirty = true;
 }
+#endif
 
 void handleList(uint32_t pressed)
 {
@@ -1144,10 +1198,12 @@ void handleList(uint32_t pressed)
         dirty       = true;
         return;
     }
+#if SSH_ENABLE_ED25519
     if (pressed & kClear) {
         importKeyFromSd();
         return;
     }
+#endif
     if (pressed & kRetry) {
         if (listSel < profileCount && !sshRunning) {
             current = listSel;
@@ -1183,16 +1239,25 @@ void handleProfile(uint32_t pressed)
         return;
     }
     if (pressed & kUp) {
+#if SSH_ENABLE_ED25519
         sel   = (sel + 6) % 7;
+#else
+        sel   = (sel + 5) % 6;
+#endif
         dirty = true;
     }
     if (pressed & kDown) {
+#if SSH_ENABLE_ED25519
         sel   = (sel + 1) % 7;
+#else
+        sel   = (sel + 1) % 6;
+#endif
         dirty = true;
     }
     if (!(pressed & kEnter)) return;
     Profile* p = currentProfile();
     if (p == nullptr) return;
+#if SSH_ENABLE_ED25519
     if (sel == 4) {
         p->auth = p->auth == 0 ? 1 : 0;
         saveProfiles();
@@ -1209,6 +1274,15 @@ void handleProfile(uint32_t pressed)
     } else {
         beginEdit(sel);
     }
+#else
+    if (sel == 4) {
+        beginEdit(4);
+    } else if (sel == 5) {
+        startWifiForSsh();
+    } else {
+        beginEdit(sel);
+    }
+#endif
 }
 
 void handleTerminal()

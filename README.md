@@ -40,7 +40,8 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
   - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；
-  - PASSWORD 或 Ed25519 key（TF 导入），首次 host key 显示 SHA256 指纹确认；
+  - 密码认证；Ed25519 key 代码保留在仓库中，但默认固件关闭；
+  - 首次 host key 显示 SHA256 指纹确认；
   - 编辑页 `, /` 移光标、光标处插入、闪烁 `_`；
   - 40×13 终端，ANSI 16 色、UTF-8 回退、64 行历史，`Opt+; .` 翻页；
   - 15 s 超时、30 s keepalive；`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。

@@ -839,7 +839,7 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 | Phase 2 WiFi 边界 | 🟡 | 外网 TCP 测试已加；WPA3/企业级/隐藏 SSID 尚未逐项实测 |
 | Phase 3 SSH spike | ✅ | LibSSH-ESP32 5.10.0 在 core 2.0.17 编译、登录成功 |
 | Phase 4 SSH MVP | ✅ | 密码认证、host key TOFU、40×13 终端 |
-| Phase 5 SSH 完善 | 🟡 | 多 profile、光标编辑、host key 指纹确认、Ed25519 key、ANSI 16 色/UTF-8 回退/64 行历史、keepalive/超时/R 重试已完成；加密 key、自动无限重连、完整备用屏待做 |
+| Phase 5 SSH 完善 | 🟡 | 多 profile、光标编辑、host key 指纹确认、ANSI 16 色/UTF-8 回退/64 行历史、keepalive/超时/R 重试已完成；Ed25519 代码保留但默认关闭；加密 key、自动无限重连待做 |
 
 与本文原计划的偏差（以代码为准）：
 
@@ -848,6 +848,8 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 - SSH 密码默认保存到 NVS `ssh/passN`（每个 profile 一份）；明文存储。
 - host key 首次连接**显示 SHA256 并交互确认**；变更时仍会报
   `HOST KEY CHANGED`，错误页 `K` 清空 known_hosts、`R` 重试。
+- Ed25519 代码保留，但默认构建用 `SSH_ENABLE_ED25519=0` 编译掉 UI/认证路径；
+  需要时改成 1，即可恢复 TF `K` 导入与 `AUTH` 行。
 - 终端支持 ANSI 16 色、UTF-8 ASCII 回退、64 行历史（`Opt+; .`）、
   `?1049h/l` 备用屏保存/恢复、滚动区与插入删除行/字符。
 - SSH 连接超时 15 s，keepalive 30 s；没有无限自动重连，错误页 `R` 手动重试。

@@ -9,13 +9,12 @@ WiFi 使用 SETTINGS 里保存的网络。
 SSH
 * DEFAULT
 + NEW PROFILE
-ENT open   E edit   D del   K key   esc back
+ENT open   E edit   D del   esc back
 ```
 
 - `ENT`：打开选中 profile；
 - `E`：进入 profile 编辑；
 - `D`：连按两次删除；
-- `K`：从 TF 卡导入 Ed25519 私钥（见下）；
 - `R`：重连选中 profile（会话关闭后回列表也可用）；
 - `+ NEW PROFILE`：新建，用 `ENT` 进入。
 
@@ -24,12 +23,11 @@ ENT open   E edit   D del   K key   esc back
 ## Profile 页
 
 ```text
-NAME / HOST / PORT / USER / AUTH / PASS|KEY / CONNECT
+NAME / HOST / PORT / USER / PASS / CONNECT
 ```
 
 - `; .` 移动；
-- `ENT` 编辑字段；`AUTH` 行按 `ENT` 在 `PASSWORD` / `ED25519 KEY` 间切换；
-- `CONNECT` 行按 `ENT` 连接；
+- `ENT` 编辑字段，或选中 `CONNECT` 连接；
 - `esc` 回列表。
 
 编辑字段：
@@ -40,18 +38,22 @@ NAME / HOST / PORT / USER / AUTH / PASS|KEY / CONNECT
 - `ENT` 保存，`Fn+BKSP` 取消；
 - 光标 `_` 闪烁，底部显示 `LEN / POS`。
 
-## Ed25519 私钥
+## Ed25519（默认关闭）
 
-当前只支持**未加密的 OpenSSH Ed25519 私钥**：
+默认固件只做密码认证：profile 没有 `AUTH`/`KEY` 行，SSH 列表也没有 `K`。
+Ed25519 的完整代码仍保留在 `src/ssh_app.cpp`，由编译宏控制：
 
-1. 把私钥放到 TF 卡的 `/ssh/id_ed25519`（公钥 `/ssh/id_ed25519.pub` 可选）；
-2. SSH 列表按 `K`，会复制到 SPIFFS `/spiffs/ssh/id_ed25519`；
-3. profile 的 `AUTH` 切到 `ED25519 KEY`；
-4. 服务器 `~/.ssh/authorized_keys` 里加入对应公钥。
+```ini
+build_flags = ... -DSSH_ENABLE_ED25519=1
+```
 
-导入失败会显示 `NO TF CARD` / `PUT KEY AT /ssh/id_ed25519`。
+重新开启后：
 
-> 私钥和密码都是明文存储（SPIFFS/NVS）。设备丢失等于凭据泄露。
+1. TF 卡 `/ssh/id_ed25519`，SSH 列表按 `K` 导入 SPIFFS；
+2. profile 的 `AUTH` 切到 `ED25519 KEY`；
+3. 服务器 `~/.ssh/authorized_keys` 加入对应公钥。
+
+只支持未加密的 OpenSSH Ed25519 私钥。私钥/密码都是明文存储。
 
 ## Host key
 
@@ -76,5 +78,5 @@ NAME / HOST / PORT / USER / AUTH / PASS|KEY / CONNECT
 - 网络断开后回列表，可用 `R` 重试（没有无限自动重连）；
 - 终端备用屏 `?1049h/l` 保存/恢复主屏；支持滚动区、插入/删除行、插入/删除字符；
   颜色/字符集仍是子集；
-- 不支持加密私钥、RSA key、多跳/代理、SFTP；
+- 不支持 Ed25519（默认构建）、加密私钥、RSA key、多跳/代理、SFTP；
 - 密码默认保存，可在 profile 里改；删除 profile 会清对应 NVS 数据。

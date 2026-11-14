@@ -12,7 +12,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |
-| SSH | LibSSH-ESP32 5.10.0（LGPL-2.1），最多 4 个 profile，密码/Ed25519、host key 指纹确认、40×13 终端；已实测密码登录 |
+| SSH | LibSSH-ESP32 5.10.0（LGPL-2.1），最多 4 个 profile，密码认证、host key 指纹确认、40×13 终端；Ed25519 代码保留但默认关闭 |
 | NFC × TF 共存 | **已解决**，见 §7.1：挂 SD 前对 ST25R3916 发 `CMD_SET_DEFAULT`，不要再打 G3 脉冲 |
 | NFC 模拟配方 | **§14.2 是唯一权威**；§13.6 是首次成功记录，§13.5 是已被推翻的历史（当时判定“做不到”） |
 | NFC 实验代际 | `nfc_spike/nfc_emu/nfc_example/nfc_store` 已在 **v1.1.0** 删除；历史见 tag `archive-nfc-spikes-2026-11-12` |
@@ -44,15 +44,17 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
   known_hosts 在 SPIFFS `/spiffs/ssh/known_hosts`。
 - Host key：首次连接显示 SHA256 指纹，`ENT` 信任/`esc` 拒绝；变更报错；
   错误页 `K` 清空 known_hosts，`R` 重试。
-- Ed25519：TF 卡 `/ssh/id_ed25519` → SSH 列表 `K` 导入 SPIFFS；
-  profile `AUTH` 切 `ED25519 KEY`；只支持未加密 OpenSSH Ed25519。
+- Ed25519：默认固件**关闭**（`SSH_ENABLE_ED25519=0`），profile 只显示
+  NAME/HOST/PORT/USER/PASS/CONNECT；代码保留在 `ssh_app.cpp`，把该宏设为 1
+  可恢复 TF `/ssh/id_ed25519` 导入与 AUTH 切换。
 - 编辑页支持 `,` / `/` 光标、光标处插入、`BKSP` 删除、闪烁 `_`。
 - 终端 40×13：ANSI 16 色、UTF-8 框线回退、64 行历史（`Opt+; .`）；
   15 s 超时、30 s keepalive；SSH task 56 KB，串口每 30 s 打 heap/stack。
 - 终端 40×13，`ssh_terminal` 做基本 VT100（光标/清屏/SGR 忽略/滚动）；
   `Fn+BKSP` 退出会话，`Fn+Q` 关闭。
-- 已知限制：无加密私钥/RSA、无无限自动重连（错误页/列表 R 手动重试）、
-  UTF-8 只做 ASCII 回退、ANSI 字符集/鼠标不完整；SSH/WiFi 密码均为 NVS 明文。
+- 已知限制：Ed25519 默认关闭、无加密私钥/RSA、无无限自动重连
+  （错误页/列表 R 手动重试）、UTF-8 只做 ASCII 回退、ANSI 字符集/鼠标不完整；
+  SSH/WiFi 密码均为 NVS 明文。
 
 > 下面 §1–§14 是历史记录，按时间保留；与 §0 冲突时以 §0 和最新代码为准。
 > `retry/` 是独立参考工程，源码仍在 git 中；不要在出货固件里引用它。
