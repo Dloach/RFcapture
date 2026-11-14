@@ -283,7 +283,11 @@ void playLast()
         return;
     }
     File f = SD.open(lastFile, FILE_READ);
-    if (!f) return;
+    if (!f) {
+        snprintf(status, sizeof(status), "OPEN FAILED");
+        dirty = true;
+        return;
+    }
     const size_t bytes = f.size();
     if (bytes <= 44) {
         f.close();
@@ -291,30 +295,35 @@ void playLast()
         dirty = true;
         return;
     }
-    if (bytes > 400000) {
-        f.close();
-        snprintf(status, sizeof(status), "TOO LARGE TO PLAY");
-        dirty = true;
-        return;
-    }
-    auto data = std::unique_ptr<int16_t[]>(new (std::nothrow) int16_t[(bytes - 44) / 2]);
-    if (!data) {
-        f.close();
-        snprintf(status, sizeof(status), "NO MEMORY");
-        dirty = true;
-        return;
-    }
     f.seek(44);
-    f.read(reinterpret_cast<uint8_t*>(data.get()), bytes - 44);
-    f.close();
     M5.Mic.end();
     M5.Speaker.begin();
     M5.Speaker.setVolume(255);
-    M5.Speaker.playRaw(data.get(), (bytes - 44) / 2, kRate, false);
-    while (M5.Speaker.isPlaying()) {
-        M5Cardputer.update();
-        delay(10);
+    static int16_t block[kBlock];
+    size_t remaining = bytes - 44;
+    snprintf(status, sizeof(status), "PLAYING");
+    dirty = true;
+    draw();
+    while (remaining > 0) {
+        size_t want = remaining > sizeof(block) ? sizeof(block) : remaining;
+        const size_t got = f.read(reinterpret_cast<uint8_t*>(block), want);
+        if (got < 2) break;
+        const size_t samplesRead = got / 2;
+        M5.Speaker.playRaw(block, samplesRead, kRate, false);
+        while (M5.Speaker.isPlaying()) {
+            M5Cardputer.update();
+            if (M5Cardputer.Keyboard.isKeyPressed('`') ||
+                M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+                M5.Speaker.stop();
+                remaining = 0;
+                break;
+            }
+            delay(2);
+        }
+        if (remaining == 0) break;
+        remaining -= got;
     }
+    f.close();
     M5.Speaker.end();
     beginMic();
     snprintf(status, sizeof(status), "PLAYED");
