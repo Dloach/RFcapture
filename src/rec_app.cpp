@@ -148,14 +148,17 @@ bool openRecording()
 
 void beginMic()
 {
-    // Cardputer ADV shares the ES8311/I2S between speaker and mic; do not end
-    // the speaker here, that can leave the codec powered down.
+    M5.Mic.end();
+    auto mc = M5.Mic.config();
+    mc.sample_rate = kRate;
+    mc.input_channel = m5::input_only_left;  // ADV ES8311 ADC is on the left slot
+    M5.Mic.config(mc);
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
         delay(1200);  // ES8311 ADC warm-up: first samples can be zero
     }
-    Serial.printf("[rec] mic=%d\n", micOk ? 1 : 0);
+    Serial.printf("[rec] mic=%d left=%d\n", micOk ? 1 : 0, mc.input_channel);
 }
 
 void stopRecording()
