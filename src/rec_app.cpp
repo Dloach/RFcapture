@@ -32,6 +32,7 @@ bool micOk = false;
 bool dirty = true;
 uint32_t prevActions = 0;
 uint32_t samples = 0;
+uint32_t savedBytes = 0;
 int peak = 0;
 char status[64] = "S start";
 char lastFile[64] = {0};
@@ -88,20 +89,25 @@ void draw()
     header();
     lcd.setTextColor(recording ? kWarn : kText, kBg);
     lcd.drawString(status, 4, 24);
+    lcd.setTextColor(micOk ? kOk : kWarn, kBg);
+    lcd.drawString(micOk ? "MIC OK" : "MIC FAIL", 4, 36);
     char line[64];
     snprintf(line, sizeof(line), "TIME %lu.%01lus", static_cast<unsigned long>(samples / kRate),
              static_cast<unsigned long>((samples % kRate) / (kRate / 10)));
-    lcd.drawString(line, 4, 42);
+    lcd.setTextColor(kText, kBg);
+    lcd.drawString(line, 4, 48);
     snprintf(line, sizeof(line), "FILE %s", lastFile[0] ? lastFile : "-");
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString(line, 4, 56);
+    lcd.drawString(line, 4, 60);
+    snprintf(line, sizeof(line), "DATA %lu B", static_cast<unsigned long>(savedBytes));
+    lcd.drawString(line, 4, 72);
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString("LEVEL", 4, 78);
-    lcd.drawRect(52, 78, 180, 10, kDim);
+    lcd.drawString("LEVEL", 4, 88);
+    lcd.drawRect(52, 88, 180, 10, kDim);
     const int w = peak * 176 / 32767;
-    lcd.fillRect(54, 80, w, 6, peak > 20000 ? kWarn : kOk);
+    lcd.fillRect(54, 90, w, 6, peak > 20000 ? kWarn : kOk);
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString("WAV 16 kHz mono to /recordings", 4, 98);
+    lcd.drawString("WAV 16 kHz mono", 4, 102);
     static const Hint h[] = {{"S", "record"}, {"P", "play"}, {"esc", "back"}};
     hints(h, 3);
     dirty = false;
@@ -167,7 +173,8 @@ void stopRecording()
     recording = false;
     writeHeader(samples * 2);
     wav.close();
-    snprintf(status, sizeof(status), "SAVED %s", lastFile);
+    savedBytes = samples * 2;
+    snprintf(status, sizeof(status), "SAVED %lu B", static_cast<unsigned long>(savedBytes));
     dirty = true;
 }
 
@@ -188,6 +195,7 @@ void startRecording()
     }
     recording = true;
     samples = 0;
+    savedBytes = 0;
     peak = 0;
     snprintf(status, sizeof(status), "RECORDING");
     dirty = true;
