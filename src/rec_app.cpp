@@ -149,8 +149,12 @@ bool openRecording()
 void beginMic()
 {
     M5.Speaker.end();
+    delay(120);  // let the ES8311/I2S teardown settle before reconfiguring
     micOk = M5.Mic.begin();
-    if (micOk) M5.Mic.setSampleRate(kRate);
+    if (micOk) {
+        M5.Mic.setSampleRate(kRate);
+        delay(1200);  // ES8311 ADC warm-up: first samples can be zero
+    }
     Serial.printf("[rec] mic=%d\n", micOk ? 1 : 0);
 }
 
@@ -189,17 +193,32 @@ void startRecording()
 void recordLoop()
 {
     static int16_t buf[kBlock];
+    bool sReleased = false;
     while (recording) {
-        if (!M5.Mic.record(buf, kBlock, kRate, false)) {
-            delay(2);
-            continue;
+        if (M5Cardputer.Keyboard.isKeyPressed('`') ||
+            M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+            break;
+        }
+        bool armed = false;
+        for (int retry = 0; retry < 8 && !armed; ++retry) {
+            armed = M5.Mic.record(buf, kBlock, kRate, false);
+            if (!armed) delay(5);
+        }
+        if (!armed) {
+            snprintf(status, sizeof(status), "MIC BUSY");
+            break;
         }
         while (M5.Mic.isRecording()) {
             M5Cardputer.update();
             if (M5Cardputer.Keyboard.isKeyPressed('`') ||
-                M5Cardputer.Keyboard.isKeyPressed('s') ||
-                M5Cardputer.Keyboard.isKeyPressed('S') ||
                 M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+                recording = false;
+                break;
+            }
+            const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
+                              M5Cardputer.Keyboard.isKeyPressed('S');
+            if (!sNow) sReleased = true;
+            if (sReleased && sNow) {
                 recording = false;
                 break;
             }
@@ -215,6 +234,10 @@ void recordLoop()
         }
         peak = p;
         dirty = true;
+        if (samples > kRate * 300) {  // 5 minute safety cap
+            snprintf(status, sizeof(status), "MAX 5 MIN");
+            break;
+        }
         if (!recording) break;
     }
     stopRecording();
@@ -230,7 +253,13 @@ void playLast()
     File f = SD.open(lastFile, FILE_READ);
     if (!f) return;
     const size_t bytes = f.size();
-    if (bytes <= 44 || bytes > 400000) {
+    if (bytes <= 44) {
+        f.close();
+        snprintf(status, sizeof(status), "EMPTY RECORDING");
+        dirty = true;
+        return;
+    }
+    if (bytes > 400000) {
         f.close();
         snprintf(status, sizeof(status), "TOO LARGE TO PLAY");
         dirty = true;
