@@ -348,8 +348,8 @@ void drawProfile()
 
     const int rows = 7;
     for (int i = 0; i < rows; ++i) {
-        const int y = 22 + i * 13;
-        if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 12, kBar);
+        const int y = 20 + i * 12;
+        if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 11, kBar);
         const uint16_t bg = i == sel ? kBar : kBg;
         const uint16_t fg = i == sel ? kAccent : kText;
         lcd.setTextColor(fg, bg);
@@ -400,6 +400,12 @@ void drawProfile()
 
     static const Hint h[] = {{"; .", "move"}, {"ENT", "edit/connect"}, {"esc", "list"}};
     hints(h, 3);
+    if (note[0]) {
+        lcd.setTextColor(kWarn, kBg);
+        char line[40];
+        snprintf(line, sizeof(line), "%.38s", note);
+        lcd.drawString(line, 6, 106);
+    }
 }
 
 void drawEditLine()
@@ -435,6 +441,12 @@ void drawEdit()
     lcd.setTextColor(kDim, kBg);
     lcd.drawString(count, 6, 64);
     if (editField == 2) lcd.drawString("1-65535", 6, 78);
+    if (note[0]) {
+        lcd.setTextColor(kWarn, kBg);
+        char line[40];
+        snprintf(line, sizeof(line), "%.38s", note);
+        lcd.drawString(line, 6, 94);
+    }
 
     static const Hint h[] = {{"ENT", "save"}, {", /", "cursor"}, {"FN BKSP", "cancel"}};
     hints(h, 3);
@@ -924,6 +936,7 @@ void beginEdit(int field)
     editPos = editLen;
     editCursorOn  = true;
     editCursorMs  = millis();
+    note[0]       = 0;
     resetEditEdges();
     // The ENTER that opened this page is still held on the next loop; require
     // a release before it can be interpreted as "save".
