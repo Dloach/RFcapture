@@ -350,10 +350,10 @@ void drawList()
     }
 
 #if SSH_ENABLE_ED25519
-    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"K", "key"}, {"esc", "back"}};
+    static const Hint h[] = {{"ENT", "connect"}, {"E", "edit"}, {"D", "del"}, {"K", "key"}, {"esc", "back"}};
     hints(h, 5);
 #else
-    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"esc", "back"}};
+    static const Hint h[] = {{"ENT", "connect"}, {"E", "edit"}, {"D", "del"}, {"esc", "back"}};
     hints(h, 4);
 #endif
 }
@@ -1312,10 +1312,8 @@ void handleList(uint32_t pressed)
         return;
     }
     current = listSel;
-    sel     = 0;
-    scr     = Scr::kProfile;
     note[0] = 0;
-    dirty   = true;
+    startWifiForSsh();
 }
 
 void handleProfile(uint32_t pressed)

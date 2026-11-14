@@ -9,11 +9,11 @@ WiFi 使用 SETTINGS 里保存的网络。
 SSH
 * DEFAULT
 + NEW PROFILE
-ENT open   E edit   D del   esc back
+ENT connect   E edit   D del   esc back
 ```
 
-- `ENT`：打开选中 profile；
-- `E`：进入 profile 编辑；
+- `ENT`：已有 profile 直接连接；`+ NEW PROFILE` 进入新建；
+- `E`：进入选中 profile 的字段编辑页；
 - `D`：连按两次删除；
 - `R`：重连选中 profile（会话关闭后回列表也可用）；
 - `+ NEW PROFILE`：新建，用 `ENT` 进入。
