@@ -16,6 +16,7 @@ ENT open   E edit   D del   K key   esc back
 - `E`：进入 profile 编辑；
 - `D`：连按两次删除；
 - `K`：从 TF 卡导入 Ed25519 私钥（见下）；
+- `R`：重连选中 profile（会话关闭后回列表也可用）；
 - `+ NEW PROFILE`：新建，用 `ENT` 进入。
 
 当前最多 4 个 profile，保存在 NVS `ssh`。旧版单 profile 会自动迁移成 `DEFAULT`。

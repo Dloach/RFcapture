@@ -1144,6 +1144,13 @@ void handleList(uint32_t pressed)
         importKeyFromSd();
         return;
     }
+    if (pressed & kRetry) {
+        if (listSel < profileCount && !sshRunning) {
+            current = listSel;
+            startWifiForSsh();
+        }
+        return;
+    }
     if (!(pressed & kEnter)) return;
 
     if (listSel >= profileCount) {
