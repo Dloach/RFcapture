@@ -26,10 +26,11 @@
 #include "settings_app.h"
 #include "ssh_app.h"
 #include "ui_prefs.h"
+#include "usbdisk_app.h"
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb };
+enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk };
 
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
@@ -109,6 +110,11 @@ void setup()
             badusbapp::setup();
             break;
 
+        case launcher::kAppUsbDisk:
+            g_running = Running::kUsbDisk;
+            usbdiskapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
@@ -148,6 +154,9 @@ void loop()
             break;
         case Running::kBadUsb:
             badusbapp::loop();
+            break;
+        case Running::kUsbDisk:
+            usbdiskapp::loop();
             break;
         default:
             launcher::menuLoop();

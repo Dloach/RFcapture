@@ -1,4 +1,4 @@
-# Cardputer ADV + CAP.CC1101：RF / NFC / 键盘 / WiFi / SSH / 文件 / BadUSB
+# Cardputer ADV + CAP.CC1101：RF / NFC / 键盘 / WiFi / SSH / 文件 / BadUSB / U 盘
 
 M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载键盘做：
 
@@ -8,9 +8,10 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
 - **SETTINGS**：WiFi 扫描/保存、OTA 无线烧录、TF 备份/恢复、亮度/超时/电池；
 - **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端；
 - **FILES**：TF / SPIFFS 文件浏览、文本查看、删除；
-- **BADUSB**：从 TF 读取 DuckyScript 子集，作为 USB HID 键盘执行。
+- **BADUSB**：从 TF 读取 DuckyScript 子集，作为 USB HID 键盘执行；
+- **USB DISK**：把整张 TF 卡作为 USB MSC 盘暴露给电脑。
 
-系统是 launcher 七功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 八功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -55,6 +56,10 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - 从 TF `/badusb/*.txt` 读取 DuckyScript 子集；
   - USB HID 键盘输出，仅限授权设备；
   - 支持 `STRING / DELAY / DEFAULTDELAY / ENTER / TAB / ESC / 方向键 / F1–F12 / 组合键`。
+- **USB DISK**
+  - 独立启动模式，把 TF 卡作为 USB MSC 盘；
+  - 电脑直接挂载、复制、删除文件；
+  - 退出前必须在电脑上安全弹出；详细见 [docs/LOCAL.md](docs/LOCAL.md)。
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
   - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；
@@ -114,7 +119,7 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 - NFC 扫描：`S` 开始/停止；
 - KEYBOARD 模式页：`ENT` 进入选中模式、`esc` 回 launcher；
 - KEYBOARD 工作页：`Fn+BKSP` 回 KEYBOARD 菜单；`Fn+`` = Esc；`Opt` = Win。
-- launcher：`; .` 上下滚动七项；`ENT` 进入；右侧九宫格照旧。
+- launcher：`; .` 上下滚动八项；`ENT` 进入；右侧九宫格照旧。
 - SETTINGS / WIFI：`S` 扫描，`ENT` 选择，密码页 `ENT` 连接、`BKSP` 删除、
   `Fn+BKSP` 取消；`TEST CONNECTION` 验证外网 TCP。
 - SSH：`; .` 选字段，`ENT` 编辑/连接；终端里 `Fn+; . , /` = 方向键，
@@ -128,7 +133,7 @@ cardputer/
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
-│   ├── launcher.*              launcher 七功能（滚动）+ 九宫格
+│   ├── launcher.*              launcher 八功能（滚动）+ 九宫格
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
 │   ├── nfc_app.*               NFC 读卡 / 列表 / 模拟
 │   ├── nfc_cards.*             NFC 卡库（SPIFFS + TF 备份）

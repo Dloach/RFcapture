@@ -43,9 +43,10 @@ bool wifiStarted       = false;
 // bytes are already in NVS appboot.
 constexpr int kMenuVisible = 4;
 const char* const kMenuItems[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "SSH",
-                                  "FILES", "BADUSB", "SETTINGS"};
+                                  "FILES", "BADUSB", "USB DISK", "SETTINGS"};
 constexpr int kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
-const App kMenuApps[] = {kAppRf, kAppNfc, kAppKbd, kAppSsh, kAppFiles, kAppBadUsb, kAppSettings};
+const App kMenuApps[] = {kAppRf, kAppNfc, kAppKbd, kAppSsh, kAppFiles, kAppBadUsb,
+                         kAppUsbDisk, kAppSettings};
 
 char status[32] = {0};  // one-line result of the last quick action
 
@@ -258,7 +259,7 @@ constexpr int kBootBarW = 192;
 constexpr int kBootBarH = 14;
 
 const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD", "SETTINGS",
-                                 "SSH", "FILES", "BADUSB"};
+                                 "SSH", "FILES", "BADUSB", "USB DISK"};
 
 void drawBootBase(App app)
 {
@@ -267,7 +268,7 @@ void drawBootBase(App app)
     lcd.setTextColor(kText, kHead);
     lcd.drawString("CARDPUTER", 3, 2);
 
-    const char* name = kBootName[app <= kAppBadUsb ? app : 0];
+    const char* name = kBootName[app <= kAppUsbDisk ? app : 0];
     lcd.setTextSize(2);
     lcd.setTextColor(kAccent, kBg);
     lcd.drawString(name, (lcd.width() - lcd.textWidth(name)) / 2, 52);
@@ -308,7 +309,7 @@ App currentApp()
     if (!p.begin(kNs, true)) return kAppMenu;
     const uint8_t v = p.getUChar("app", kAppMenu);
     p.end();
-    return v <= kAppBadUsb ? static_cast<App>(v) : kAppMenu;
+    return v <= kAppUsbDisk ? static_cast<App>(v) : kAppMenu;
 }
 
 void rebootInto(App app)

@@ -33,6 +33,7 @@ enum App : uint8_t {
     kAppSsh      = 6,  // SSH client over WiFi
     kAppFiles    = 7,  // TF/SPIFFS file browser
     kAppBadUsb   = 8,  // DuckyScript over USB HID
+    kAppUsbDisk  = 9,  // TF card as USB MSC drive
 };
 
 /// Which app this boot belongs to (from NVS).
