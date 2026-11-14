@@ -7,6 +7,7 @@
 #include <cstring>
 #include <vector>
 
+#include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
 #include "ui_hint.h"
@@ -149,11 +150,11 @@ void drawSettings()
     lcd.fillScreen(kBg);
     header("SETTINGS");
 
-    const char* items[] = {"WIFI SETTINGS", "OTA UPDATE"};
+    const char* items[] = {"WIFI SETTINGS", "OTA UPDATE", "BACKUP / RESTORE"};
     lcd.setTextSize(2);
-    for (int i = 0; i < 2; ++i) {
-        const int y = 30 + i * 28;
-        if (i == settingsSel) lcd.fillRect(4, y - 4, lcd.width() - 8, 22, kBar);
+    for (int i = 0; i < 3; ++i) {
+        const int y = 20 + i * 26;
+        if (i == settingsSel) lcd.fillRect(4, y - 4, lcd.width() - 8, 21, kBar);
         lcd.setTextColor(i == settingsSel ? kAccent : kText, i == settingsSel ? kBar : kBg);
         lcd.drawString(items[i], 12, y);
     }
@@ -161,11 +162,11 @@ void drawSettings()
 
     lcd.setTextColor(kDim, kBg);
     if (settingsSel == 0) {
-        lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 72);
-        lcd.drawString("Saved networks auto-connect on boot.", 6, 86);
+        lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 100);
+    } else if (settingsSel == 1) {
+        lcd.drawString("Wireless flash; keep this page open.", 6, 100);
     } else {
-        lcd.drawString("Wireless flash from PlatformIO.", 6, 72);
-        lcd.drawString("HOST cardputer.local   PORT 3232", 6, 86);
+        lcd.drawString("TF backup / restore RF, NFC, bindings.", 6, 100);
     }
 
     static const Hint h[] = {{"ENT", "open"}, {"esc", "back"}};
@@ -1023,16 +1024,21 @@ bool loop()
                 return true;
             }
             if (pressed & kUp) {
-                settingsSel = (settingsSel + 1) % 2;
+                settingsSel = (settingsSel + 2) % 3;
                 dirty       = true;
             }
             if (pressed & kDown) {
-                settingsSel = (settingsSel + 1) % 2;
+                settingsSel = (settingsSel + 1) % 3;
                 dirty       = true;
             }
             if (pressed & kEnter) {
-                if (settingsSel == 0) enterWifi();
-                else enterOta();
+                if (settingsSel == 0) {
+                    enterWifi();
+                } else if (settingsSel == 1) {
+                    enterOta();
+                } else {
+                    launcher::rebootInto(launcher::kAppBackup);
+                }
             }
             break;
         case Scr::kOta:

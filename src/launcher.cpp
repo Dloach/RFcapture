@@ -42,10 +42,9 @@ bool wifiStarted       = false;
 // from the App numeric values: BACKUP must stay 3 and KEYBOARD 4 because those
 // bytes are already in NVS appboot.
 constexpr int kMenuVisible = 4;
-const char* const kMenuItems[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "BACKUP",
-                                  "SSH", "SETTINGS"};
+const char* const kMenuItems[] = {"RF TOOLS", "NFC TOOLS", "KEYBOARD", "SSH", "SETTINGS"};
 constexpr int kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
-const App kMenuApps[] = {kAppRf, kAppNfc, kAppKbd, kAppBackup, kAppSsh, kAppSettings};
+const App kMenuApps[] = {kAppRf, kAppNfc, kAppKbd, kAppSsh, kAppSettings};
 
 char status[32] = {0};  // one-line result of the last quick action
 

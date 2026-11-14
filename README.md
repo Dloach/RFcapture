@@ -5,10 +5,10 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
 - **RF**：采集、保存并重发铁门 / 卷帘门 / 道闸等 OOK 遥控器（EV1527 / PT2262 固定码）；
 - **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）；
 - **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）；
-- **SETTINGS**：扫描 2.4 GHz WiFi、输密码、保存并开机自动连接；
+- **SETTINGS**：WiFi 扫描/保存、OTA 无线烧录、TF 备份/恢复；
 - **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端。
 
-系统是 launcher 六功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 五功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -24,7 +24,7 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - `READ CARDS`：扫描并入库（UID / ATQA / SAK / 类型）；
   - `CARD LIST`：选中 `ENTER` 模拟、`B` 绑定九宫格、`D` 删除、`N` 改名；
   - 模拟配方见 `docs/DEV-STATE.md` §14.2。
-- **BACKUP**
+- **SETTINGS → BACKUP / RESTORE**
   - 一次把 RF 永久信号、NFC 卡库、九宫格绑定写到 TF 卡；
   - `RESTORE FROM TF` 恢复三份数据（会先确认）。
 - **KEYBOARD**
