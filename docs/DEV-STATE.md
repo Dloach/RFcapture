@@ -8,7 +8,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 六功能 **RF TOOLS / NFC TOOLS / KEYBOARD / BACKUP / SETTINGS / SSH**，左侧 4 行滚动 + 右侧 3×3 九宫格；每个功能一次重启 |
+| 功能结构 | launcher 六功能 **RF TOOLS / NFC TOOLS / KEYBOARD / BACKUP / SSH / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；每个功能一次重启 |
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |
