@@ -732,7 +732,10 @@ void sshTask(void*)
 
         if (millis() - lastKeepalive >= 30000) {
             lastKeepalive = millis();
-            ssh_send_keepalive(session);
+            if (ssh_send_keepalive(session) != SSH_OK) {
+                Serial.println("[ssh] keepalive failed");
+                break;
+            }
         }
         if (millis() - lastStats >= 30000) {
             lastStats = millis();
@@ -830,6 +833,7 @@ void startWifiForSsh()
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
     WiFi.disconnect(false, false);
     WiFi.begin(net->ssid, net->pass);
     wifiConnecting = true;
@@ -1370,6 +1374,7 @@ void setup()
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
     wifistore::begin();
     if (wifistore::count() > 0) {
         const auto* n = wifistore::last();
