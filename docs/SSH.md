@@ -58,9 +58,9 @@ build_flags = ... -DSSH_ENABLE_ED25519=1
 ## Host key
 
 - 首次连接新主机：显示 SHA256 指纹，`ENT` 信任并写入
-  `/spiffs/ssh/known_hosts`，`esc` 拒绝。
+  `/spiffs/ssh/hostkeys.txt`，`esc` 拒绝。
 - 主机 key 变更：报 `HOST KEY CHANGED`，不自动覆盖。
-- 错误页 `K`：清空 known_hosts；`R`：重试；`ENT`：回列表。
+- 错误页 `K`：清空 hostkeys；`R`：重试；`ENT`：回列表。
 - 目前没有“只删除某一条主机”的 UI，`K` 是全部清空。
 
 ## 终端

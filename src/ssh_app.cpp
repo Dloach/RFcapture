@@ -632,6 +632,50 @@ void drawCurrent()
     }
 }
 
+// Host-key trust is kept in a firmware-owned file instead of relying on
+// libssh's known_hosts path check: on this Arduino/SPIFFS VFS `access()` can
+// report a present file as missing, which made every connection re-prompt.
+constexpr char kHostKeyStore[] = "/ssh/hostkeys.txt";
+enum HostKeyLookup : uint8_t { kHostKeyMissing = 0, kHostKeyMatch = 1, kHostKeyChanged = 2 };
+
+int lookupHostKey(const char* host, uint16_t port, const char* fingerprint)
+{
+    if (host == nullptr || fingerprint == nullptr) return kHostKeyMissing;
+    File f = SPIFFS.open(kHostKeyStore, FILE_READ);
+    if (!f) return kHostKeyMissing;
+    int result = kHostKeyMissing;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        char h[64];
+        unsigned p = 0;
+        char fp[65];
+        if (sscanf(line.c_str(), "%63s %u %64s", h, &p, fp) == 3 && strcmp(h, host) == 0 &&
+            p == port) {
+            result = strcmp(fp, fingerprint) == 0 ? kHostKeyMatch : kHostKeyChanged;
+            break;
+        }
+    }
+    f.close();
+    return result;
+}
+
+bool saveHostKey(const char* host, uint16_t port, const char* fingerprint)
+{
+    if (host == nullptr || fingerprint == nullptr) return false;
+    File f;
+    if (SPIFFS.exists(kHostKeyStore)) {
+        f = SPIFFS.open(kHostKeyStore, FILE_APPEND);
+    } else {
+        f = SPIFFS.open(kHostKeyStore, FILE_WRITE);
+    }
+    if (!f) return false;
+    f.printf("%s %u %s\n", host, static_cast<unsigned>(port), fingerprint);
+    f.close();
+    return true;
+}
+
+
 // ---------------------------------------------------------------------------
 // SSH task
 // ---------------------------------------------------------------------------
@@ -668,8 +712,6 @@ void sshTask(void*)
             goto done;
         }
     }
-    ssh_options_set(session, SSH_OPTIONS_KNOWNHOSTS, "/spiffs/ssh/known_hosts");
-
     sshPhase = 1;
     if (ssh_connect(session) != SSH_OK) {
         char msg[48];
@@ -683,52 +725,48 @@ void sshTask(void*)
     }
 
     {
-        const enum ssh_known_hosts_e known = ssh_session_is_known_server(session);
-        if (known == SSH_KNOWN_HOSTS_CHANGED || known == SSH_KNOWN_HOSTS_OTHER) {
+        ssh_key serverKey   = nullptr;
+        unsigned char* hash = nullptr;
+        size_t hashLen      = 0;
+        if (ssh_get_server_publickey(session, &serverKey) != SSH_OK ||
+            ssh_get_publickey_hash(serverKey, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLen) != SSH_OK ||
+            hash == nullptr || hashLen < 32) {
+            if (hash != nullptr) ssh_clean_pubkey_hash(&hash);
+            if (serverKey != nullptr) ssh_key_free(serverKey);
+            setError("HOST KEY HASH FAILED");
+            goto done;
+        }
+        for (int i = 0; i < 32; ++i) snprintf(&hostKeyFingerprint[i * 2], 3, "%02x", hash[i]);
+        hostKeyFingerprint[64] = 0;
+        copyCString(hostKeyHost, sizeof(hostKeyHost), connectHost);
+        ssh_clean_pubkey_hash(&hash);
+        ssh_key_free(serverKey);
+
+        if (sshStop) {
+            sshPhase = 5;
+            goto done;
+        }
+
+        const int stored = lookupHostKey(connectHost, connectPort, hostKeyFingerprint);
+        if (stored == kHostKeyChanged) {
             setError("HOST KEY CHANGED");
             goto done;
         }
-        if (known == SSH_KNOWN_HOSTS_UNKNOWN || known == SSH_KNOWN_HOSTS_NOT_FOUND) {
-            ssh_key serverKey   = nullptr;
-            unsigned char* hash = nullptr;
-            size_t hashLen      = 0;
-            if (ssh_get_server_publickey(session, &serverKey) != SSH_OK ||
-                ssh_get_publickey_hash(serverKey, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLen) !=
-                    SSH_OK ||
-                hash == nullptr || hashLen < 32) {
-                if (hash != nullptr) ssh_clean_pubkey_hash(&hash);
-                if (serverKey != nullptr) ssh_key_free(serverKey);
-                setError("HOST KEY HASH FAILED");
-                goto done;
-            }
-            for (int i = 0; i < 32; ++i) snprintf(&hostKeyFingerprint[i * 2], 3, "%02x", hash[i]);
-            hostKeyFingerprint[64] = 0;
-            copyCString(hostKeyHost, sizeof(hostKeyHost), connectHost);
-            ssh_clean_pubkey_hash(&hash);
-            ssh_key_free(serverKey);
-
-            if (sshStop) {
-                sshPhase = 5;
-                goto done;
-            }
+        if (stored == kHostKeyMissing) {
             hostKeyDecision = 0;
             sshPhase        = 6;
             while (hostKeyDecision == 0 && !sshStop) vTaskDelay(pdMS_TO_TICKS(50));
             if (sshStop || hostKeyDecision != 1) {
-                // A user rejection is not an SSH failure; leave the closed
-                // phase so the list stays clean.  A real mismatch was handled
-                // above as "HOST KEY CHANGED".
                 if (hostKeyDecision == 2) sshPhase = 5;
                 else setError("HOST KEY REJECTED");
                 goto done;
             }
-            sshPhase = 2;
-            // LibSSH-ESP32 5.10 uses the newer known-hosts update API; the old
-            // ssh_write_knownhost symbol is declared but not provided.
-            if (ssh_session_update_known_hosts(session) != SSH_OK) {
-                setError("KNOWN_HOSTS WRITE FAILED");
+            if (!saveHostKey(connectHost, connectPort, hostKeyFingerprint)) {
+                setError("HOSTKEY SAVE FAILED");
                 goto done;
             }
+            Serial.printf("[ssh] host key trusted %s:%u\n", connectHost,
+                          static_cast<unsigned>(connectPort));
         }
     }
 
@@ -1422,7 +1460,8 @@ void handleError(uint32_t pressed)
     if (pressed & kClear) {
         SPIFFS.begin(true);
         SPIFFS.remove("/ssh/known_hosts");
-        copyCString(note, sizeof(note), "KNOWN HOSTS CLEARED");
+        SPIFFS.remove("/ssh/hostkeys.txt");
+        copyCString(note, sizeof(note), "HOST KEYS CLEARED");
         scr   = Scr::kList;
         dirty = true;
         return;

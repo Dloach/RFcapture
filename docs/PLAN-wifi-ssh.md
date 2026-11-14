@@ -847,7 +847,9 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
   当前最多 4 个（`nameN/hostN/portN/userN/passN`），旧的单 profile 键会自动迁移到 profile 0。
 - SSH 密码默认保存到 NVS `ssh/passN`（每个 profile 一份）；明文存储。
 - host key 首次连接**显示 SHA256 并交互确认**；变更时仍会报
-  `HOST KEY CHANGED`，错误页 `K` 清空 known_hosts、`R` 重试。
+  `HOST KEY CHANGED`，错误页 `K` 清空 hostkeys、`R` 重试。
+- host key 存在 SPIFFS `/spiffs/ssh/hostkeys.txt`（固件自有格式），不依赖
+  libssh 在 SPIFFS 上的 known_hosts `access()` 检查。
 - Ed25519 代码保留，但默认构建用 `SSH_ENABLE_ED25519=0` 编译掉 UI/认证路径；
   需要时改成 1，即可恢复 TF `K` 导入与 `AUTH` 行。
 - 终端支持 ANSI 16 色、UTF-8 ASCII 回退、64 行历史（`Opt+; .`）、

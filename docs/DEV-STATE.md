@@ -44,9 +44,10 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
   `ssh_app` 使用 56 KB FreeRTOS task，不能塞进 Arduino loop 栈。
 - SSH profile 在 NVS `ssh`（最多 4 个：name/host/port/user/auth/pass/keyPath）；
   `+ NEW PROFILE` 新建，`E` 编辑，`D` 连按两次删除，`ENT` 打开；
-  known_hosts 在 SPIFFS `/spiffs/ssh/known_hosts`。
+  host key 存在 SPIFFS `/spiffs/ssh/hostkeys.txt`（固件自有格式，
+  避免 libssh 在 SPIFFS 上 `access()` 误报文件不存在）。
 - Host key：首次连接显示 SHA256 指纹，`ENT` 信任/`esc` 拒绝；变更报错；
-  错误页 `K` 清空 known_hosts，`R` 重试。
+  错误页 `K` 清空 hostkeys，`R` 重试。
 - Ed25519：默认固件**关闭**（`SSH_ENABLE_ED25519=0`），profile 只显示
   NAME/HOST/PORT/USER/PASS/CONNECT；代码保留在 `ssh_app.cpp`，把该宏设为 1
   可恢复 TF `/ssh/id_ed25519` 导入与 AUTH 切换。
