@@ -23,7 +23,7 @@ constexpr uint16_t kWarn   = 0xF800;
 constexpr uint16_t kHead   = 0x18E3;
 
 constexpr uint32_t kRate = 16000;
-constexpr size_t kBlock = 1600;  // 100 ms
+constexpr size_t kBlock = 240;  // 15 ms, matches M5's mic_wav_record example
 
 auto& lcd = M5Cardputer.Display;
 bool sdOk = false;
@@ -155,16 +155,14 @@ bool openRecording()
 void beginMic()
 {
     M5.Mic.end();
-    auto mc = M5.Mic.config();
-    mc.sample_rate = kRate;
-    mc.input_channel = m5::input_only_left;  // ADV ES8311 ADC is on the left slot
-    M5.Mic.config(mc);
+    M5.Speaker.end();   // official Cardputer mic_wav_record sequence
+    delay(100);
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
-        delay(1200);  // ES8311 ADC warm-up: first samples can be zero
+        delay(1200);  // ES8311 ADC warm-up
     }
-    Serial.printf("[rec] mic=%d left=%d\n", micOk ? 1 : 0, mc.input_channel);
+    Serial.printf("[rec] mic=%d\n", micOk ? 1 : 0);
 }
 
 void stopRecording()
@@ -205,6 +203,7 @@ void recordLoop()
 {
     static int16_t buf[kBlock];
     bool sReleased = false;
+    int drawCounter = 0;
     while (recording) {
         if (M5Cardputer.Keyboard.isKeyPressed('`') ||
             M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
@@ -216,30 +215,13 @@ void recordLoop()
             if (!armed) delay(5);
         }
         if (!armed) {
-            snprintf(status, sizeof(status), "MIC BUSY"); 
+            snprintf(status, sizeof(status), "MIC BUSY");
             break;
         }
-        const uint32_t blockStart = millis();
-        while (M5.Mic.isRecording()) {
-            M5Cardputer.update();
-            if (M5Cardputer.Keyboard.isKeyPressed('`') ||
-                M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-                recording = false;
-                break;
-            }
-            const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
-                              M5Cardputer.Keyboard.isKeyPressed('S');
-            if (!sNow) sReleased = true;
-            if (sReleased && sNow) {
-                recording = false;
-                break;
-            }
-            delay(1);
-        }
-        // isRecording() can go 0 just before the capture task publishes the
-        // completed block; never write the buffer before its time window.
-        const uint32_t blockMs = static_cast<uint32_t>(kBlock) * 1000u / kRate;
-        while (millis() - blockStart < blockMs + 20) delay(1);
+        // The official mic_wav_record example does not spin on isRecording();
+        // it records the next block while the previous one drains.  240
+        // samples are 15 ms; 20 ms is enough for one double-buffered block.
+        delay(20);
         if (samples == 0) writeHeader(0);
         const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf), kBlock * 2);
         if (wrote != kBlock * 2) {
@@ -253,14 +235,21 @@ void recordLoop()
             if (v > p) p = v;
         }
         peak = p;
-        dirty = true;
+        if (++drawCounter >= 8) {
+            drawCounter = 0;
+            dirty = true;
+        }
+        const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
+                          M5Cardputer.Keyboard.isKeyPressed('S');
+        if (!sNow) sReleased = true;
+        if (sReleased && sNow) break;
         if (samples > kRate * 300) {  // 5 minute safety cap
             snprintf(status, sizeof(status), "MAX 5 MIN");
             break;
         }
-        if (!recording) break;
     }
     stopRecording();
+    draw();
 }
 
 void playLast()
