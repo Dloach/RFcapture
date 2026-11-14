@@ -30,3 +30,4 @@ docs/build-*.log
 # unified firmware's NFC TOOLS).  Its source is tracked on purpose: it is the
 # compact, verified record of the old emulation path; its .pio/ build tree is
 # already covered by the global rule above.
+docs/ota-*.log
