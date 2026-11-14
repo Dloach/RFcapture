@@ -2,6 +2,7 @@
 
 #include <M5Cardputer.h>
 #include <Preferences.h>
+#include <SD.h>
 #include <SPIFFS.h>
 #include <WiFi.h>
 
@@ -10,10 +11,12 @@
 
 #include "libssh_esp32.h"
 #include <libssh/libssh.h>
+#include <libssh/server.h>
 
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
+#include "sd_mount.h"
 #include "ssh_terminal.h"
 #include "ui_hint.h"
 #include "wifi_store.h"
@@ -39,7 +42,9 @@ struct Profile {
     char host[64] = {0};
     char user[32] = {0};
     char pass[64] = {0};
+    char keyPath[48] = "/spiffs/ssh/id_ed25519";
     uint16_t port = 22;
+    uint8_t auth = 0;  // 0 password, 1 Ed25519 key
 };
 
 constexpr int kMaxProfiles = 4;
@@ -56,6 +61,7 @@ enum class Scr : uint8_t {
     kConnecting,
     kTerminal,
     kError,
+    kHostKey,
 };
 Scr scr = Scr::kList;
 bool dirty = true;
@@ -68,6 +74,8 @@ char note[64] = {0};
 bool wifiConnecting = false;
 uint32_t wifiStart = 0;
 bool wifiForSsh = false;
+int termScroll = 0;
+uint8_t prevScroll = 0;
 
 // SSH task state is written by the task and polled by the UI.
 volatile int sshPhase = 0;  // 0 idle, 1 TCP, 2 auth, 3 shell, 4 failed, 5 closed
@@ -79,7 +87,14 @@ QueueHandle_t keyQ = nullptr;
 char connectHost[64] = {0};
 char connectUser[32] = {0};
 char connectPass[64] = {0};
+char connectKeyPath[48] = {0};
 uint16_t connectPort = 22;
+uint8_t connectAuth = 0;
+
+// Host-key confirmation, written by the SSH task and answered by the UI.
+char hostKeyFingerprint[65] = {0};
+char hostKeyHost[64] = {0};
+volatile uint8_t hostKeyDecision = 0;  // 0 wait, 1 trust, 2 reject
 
 // Editing.
 int editField = 0;
@@ -191,6 +206,9 @@ void loadProfiles()
             copyString(profiles[0].pass, sizeof(profiles[0].pass), p.getString("pass", ""));
             profiles[0].port = p.getUShort("port", 22);
             if (profiles[0].port == 0) profiles[0].port = 22;
+            profiles[0].auth = p.getUChar("auth", 0);
+            copyString(profiles[0].keyPath, sizeof(profiles[0].keyPath),
+                       p.getString("key", "/spiffs/ssh/id_ed25519"));
             profileCount = 1;
         }
         p.end();
@@ -211,6 +229,11 @@ void loadProfiles()
         snprintf(key, sizeof(key), "port%d", i);
         profiles[i].port = p.getUShort(key, 22);
         if (profiles[i].port == 0) profiles[i].port = 22;
+        snprintf(key, sizeof(key), "auth%d", i);
+        profiles[i].auth = p.getUChar(key, 0);
+        snprintf(key, sizeof(key), "key%d", i);
+        copyString(profiles[i].keyPath, sizeof(profiles[i].keyPath),
+                   p.getString(key, "/spiffs/ssh/id_ed25519"));
         if (profiles[i].name[0] == 0) snprintf(profiles[i].name, sizeof(profiles[i].name), "PROFILE %d", i + 1);
     }
     profileCount = n;
@@ -237,6 +260,10 @@ void saveProfiles()
         p.putString(key, i < profileCount ? profiles[i].pass : "");
         snprintf(key, sizeof(key), "port%d", i);
         p.putUShort(key, i < profileCount ? profiles[i].port : 0);
+        snprintf(key, sizeof(key), "auth%d", i);
+        p.putUChar(key, i < profileCount ? profiles[i].auth : 0);
+        snprintf(key, sizeof(key), "key%d", i);
+        p.putString(key, i < profileCount ? profiles[i].keyPath : "");
     }
     p.end();
     Serial.printf("[ssh] profiles saved count=%d current=%d\n", profileCount, current);
@@ -301,8 +328,8 @@ void drawList()
         lcd.drawString(line, 6, 104);
     }
 
-    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"esc", "back"}};
-    hints(h, 4);
+    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"K", "key"}, {"esc", "back"}};
+    hints(h, 5);
 }
 
 void drawProfile()
@@ -319,10 +346,10 @@ void drawProfile()
         return;
     }
 
-    const int rows = 6;
+    const int rows = 7;
     for (int i = 0; i < rows; ++i) {
-        const int y = 26 + i * 14;
-        if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 13, kBar);
+        const int y = 22 + i * 13;
+        if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 12, kBar);
         const uint16_t bg = i == sel ? kBar : kBg;
         const uint16_t fg = i == sel ? kAccent : kText;
         lcd.setTextColor(fg, bg);
@@ -347,14 +374,22 @@ void drawProfile()
             snprintf(val, sizeof(val), "%.26s", p->user[0] ? p->user : "(empty)");
             lcd.drawString(val, 58, y);
         } else if (i == 4) {
-            char stars[24];
-            const int n = strlen(p->pass);
-            const int show = n < 20 ? n : 20;
-            for (int k = 0; k < show; ++k) stars[k] = '*';
-            if (show == 20) stars[19] = '+';
-            stars[show] = 0;
-            lcd.drawString("PASS", 6, y);
-            lcd.drawString(p->pass[0] ? stars : "(empty)", 58, y);
+            lcd.drawString("AUTH", 6, y);
+            lcd.drawString(p->auth == 1 ? "ED25519 KEY" : "PASSWORD", 58, y);
+        } else if (i == 5) {
+            if (p->auth == 1) {
+                lcd.drawString("KEY", 6, y);
+                lcd.drawString("ED25519", 58, y);
+            } else {
+                char stars[24];
+                const int n = strlen(p->pass);
+                const int show = n < 20 ? n : 20;
+                for (int k = 0; k < show; ++k) stars[k] = '*';
+                if (show == 20) stars[19] = '+';
+                stars[show] = 0;
+                lcd.drawString("PASS", 6, y);
+                lcd.drawString(p->pass[0] ? stars : "(empty)", 58, y);
+            }
         } else {
             lcd.setTextColor(kOk, bg);
             lcd.drawString("CONNECT", 6, y);
@@ -390,7 +425,8 @@ void drawEditLine()
 void drawEdit()
 {
     lcd.fillScreen(kBg);
-    const char* titles[] = {"EDIT NAME", "EDIT HOST", "EDIT PORT", "EDIT USER", "EDIT PASSWORD"};
+    const char* titles[] = {"EDIT NAME", "EDIT HOST", "EDIT PORT", "EDIT USER",
+                            "EDIT PASSWORD", "EDIT KEY PATH"};
     header(titles[editField]);
     drawEditLine();
 
@@ -447,17 +483,29 @@ void drawTerminal()
     snprintf(title, sizeof(title), "SSH %.20s", connectHost[0] ? connectHost : "?");
     header(title);
 
-    char snap[sshterm::kRows][sshterm::kCols + 1];
-    sshterm::snapshot(snap);
-    lcd.setTextColor(kText, kBg);
+    static const uint16_t palette[16] = {
+        0x0000, 0xF800, 0x07E0, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF,
+        0x8410, 0xF81F, 0x07FF, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF,
+    };
+
+    sshterm::Cell snap[sshterm::kRows][sshterm::kCols];
+    sshterm::snapshot(snap, termScroll);
     for (int r = 0; r < sshterm::kRows; ++r) {
         const int y = 14 + r * 8;
         lcd.fillRect(0, y, lcd.width(), 8, kBg);
-        lcd.drawString(snap[r], 0, y);
+        for (int c = 0; c < sshterm::kCols; ++c) {
+            const sshterm::Cell& cell = snap[r][c];
+            const uint16_t fg = palette[cell.fg & 15];
+            const uint16_t bg = palette[cell.bg & 15];
+            const int x = c * 6;
+            if (bg != kBg) lcd.fillRect(x, y, 6, 8, bg);
+            lcd.setTextColor(fg, bg);
+            lcd.drawChar(x, y, cell.ch);
+        }
     }
 
-    static const Hint h[] = {{"FN BKSP", "back"}, {"FN Q", "close"}};
-    hints(h, 2);
+    static const Hint h[] = {{"FN BKSP", "back"}, {"FN Q", "close"}, {"OPT ; .", "scroll"}};
+    hints(h, 3);
 }
 
 void drawError()
@@ -470,9 +518,39 @@ void drawError()
     lcd.drawString(msg, 6, 30);
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("Check profile, WiFi, host key.", 6, 58);
-    lcd.drawString("ENT: list   esc: launcher", 6, 76);
+    lcd.drawString("ENT list   R retry   K clear keys", 6, 76);
 
-    static const Hint h[] = {{"ENT", "list"}, {"esc", "launcher"}};
+    static const Hint h[] = {{"ENT", "list"}, {"R", "retry"}, {"K", "keys"}, {"esc", "launcher"}};
+    hints(h, 4);
+}
+
+void drawHostKey()
+{
+    lcd.fillScreen(kBg);
+    header("HOST KEY");
+    lcd.setTextColor(kAccent, kBg);
+    lcd.drawString("NEW SSH HOST", 6, 22);
+
+    lcd.setTextColor(kText, kBg);
+    char host[30];
+    snprintf(host, sizeof(host), "%.28s", hostKeyHost);
+    lcd.drawString(host, 6, 38);
+
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawString("SHA256", 6, 54);
+    char a[33];
+    char b[33];
+    memcpy(a, hostKeyFingerprint, 32);
+    a[32] = 0;
+    memcpy(b, hostKeyFingerprint + 32, 32);
+    b[32] = 0;
+    lcd.setTextColor(kText, kBg);
+    lcd.drawString(a, 6, 66);
+    lcd.drawString(b, 6, 78);
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawString("Trust this host key?", 6, 96);
+
+    static const Hint h[] = {{"ENT", "trust"}, {"esc", "reject"}};
     hints(h, 2);
 }
 
@@ -486,6 +564,7 @@ void drawCurrent()
         case Scr::kConnecting: drawConnecting(); break;
         case Scr::kTerminal: drawTerminal(); break;
         case Scr::kError: drawError(); break;
+        case Scr::kHostKey: drawHostKey(); break;
     }
 }
 
@@ -502,6 +581,9 @@ void sshTask(void*)
 {
     ssh_session session = ssh_new();
     ssh_channel channel  = nullptr;
+    uint32_t lastKeepalive = 0;
+    uint32_t lastStats     = 0;
+    char buf[512];
     if (session == nullptr) {
         setError("NO MEMORY (ssh_new)");
         sshRunning = false;
@@ -513,7 +595,7 @@ void sshTask(void*)
     unsigned int port = connectPort;
     ssh_options_set(session, SSH_OPTIONS_PORT, &port);
     ssh_options_set(session, SSH_OPTIONS_USER, connectUser);
-    long timeout = 10;
+    long timeout = 15;
     ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
 
     if (!SPIFFS.begin(true) || !SPIFFS.exists("/ssh")) {
@@ -539,6 +621,36 @@ void sshTask(void*)
             goto done;
         }
         if (known == SSH_KNOWN_HOSTS_UNKNOWN || known == SSH_KNOWN_HOSTS_NOT_FOUND) {
+            ssh_key serverKey   = nullptr;
+            unsigned char* hash = nullptr;
+            size_t hashLen      = 0;
+            if (ssh_get_server_publickey(session, &serverKey) != SSH_OK ||
+                ssh_get_publickey_hash(serverKey, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLen) !=
+                    SSH_OK ||
+                hash == nullptr || hashLen < 32) {
+                if (hash != nullptr) ssh_clean_pubkey_hash(&hash);
+                if (serverKey != nullptr) ssh_key_free(serverKey);
+                setError("HOST KEY HASH FAILED");
+                goto done;
+            }
+            for (int i = 0; i < 32; ++i) snprintf(&hostKeyFingerprint[i * 2], 3, "%02x", hash[i]);
+            hostKeyFingerprint[64] = 0;
+            copyCString(hostKeyHost, sizeof(hostKeyHost), connectHost);
+            ssh_clean_pubkey_hash(&hash);
+            ssh_key_free(serverKey);
+
+            hostKeyDecision = 0;
+            sshPhase        = 6;
+            while (hostKeyDecision == 0 && !sshStop) vTaskDelay(pdMS_TO_TICKS(50));
+            if (sshStop || hostKeyDecision != 1) {
+                // A user rejection is not an SSH failure; leave the closed
+                // phase so the list stays clean.  A real mismatch was handled
+                // above as "HOST KEY CHANGED".
+                if (hostKeyDecision == 2) sshPhase = 5;
+                else setError("HOST KEY REJECTED");
+                goto done;
+            }
+            sshPhase = 2;
             // LibSSH-ESP32 5.10 uses the newer known-hosts update API; the old
             // ssh_write_knownhost symbol is declared but not provided.
             if (ssh_session_update_known_hosts(session) != SSH_OK) {
@@ -549,7 +661,21 @@ void sshTask(void*)
     }
 
     sshPhase = 2;
-    if (ssh_userauth_password(session, nullptr, connectPass) != SSH_AUTH_SUCCESS) {
+    if (connectAuth == 1) {
+        ssh_key key = nullptr;
+        if (ssh_pki_import_privkey_file(connectKeyPath, nullptr, nullptr, nullptr, &key) != SSH_OK) {
+            setError("KEY IMPORT FAILED");
+            goto done;
+        }
+        const int rc = ssh_userauth_publickey(session, connectUser, key);
+        ssh_key_free(key);
+        if (rc != SSH_AUTH_SUCCESS) {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "KEY AUTH: %.26s", ssh_get_error(session));
+            setError(msg);
+            goto done;
+        }
+    } else if (ssh_userauth_password(session, nullptr, connectPass) != SSH_AUTH_SUCCESS) {
         char msg[48];
         snprintf(msg, sizeof(msg), "AUTH: %.30s", ssh_get_error(session));
         setError(msg);
@@ -572,10 +698,12 @@ void sshTask(void*)
 
     sshterm::clear();
     sshPhase = 3;
-    Serial.printf("[ssh] shell open %s@%s:%u\n", connectUser, connectHost,
-                  static_cast<unsigned>(connectPort));
+    Serial.printf("[ssh] shell open %s@%s:%u heap=%u stack=%u\n", connectUser, connectHost,
+                  static_cast<unsigned>(connectPort), static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
 
-    char buf[512];
+    lastKeepalive = millis();
+    lastStats     = millis();
     while (!sshStop) {
         uint8_t key;
         while (keyQ != nullptr && xQueueReceive(keyQ, &key, 0) == pdTRUE) {
@@ -585,9 +713,20 @@ void sshTask(void*)
         if (n > 0) {
             sshterm::feed(buf, n);
         } else if (n < 0 && n != SSH_AGAIN) {
+            Serial.printf("[ssh] read error %d: %s\n", n, ssh_get_error(session));
             break;
         }
         if (ssh_channel_is_eof(channel)) break;
+
+        if (millis() - lastKeepalive >= 30000) {
+            lastKeepalive = millis();
+            ssh_send_keepalive(session);
+        }
+        if (millis() - lastStats >= 30000) {
+            lastStats = millis();
+            Serial.printf("[ssh] heap=%u stack=%u\n", static_cast<unsigned>(ESP.getFreeHeap()),
+                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
@@ -619,10 +758,13 @@ bool startSsh()
     copyCString(connectHost, sizeof(connectHost), p->host);
     copyCString(connectUser, sizeof(connectUser), p->user);
     copyCString(connectPass, sizeof(connectPass), p->pass);
+    copyCString(connectKeyPath, sizeof(connectKeyPath), p->keyPath);
     connectPort = p->port;
+    connectAuth = p->auth;
     sshError[0] = 0;
     sshStop     = false;
     sshPhase    = 1;
+    hostKeyDecision = 0;
     sshterm::clear();
 
     if (keyQ == nullptr) keyQ = xQueueCreate(128, sizeof(uint8_t));
@@ -652,6 +794,7 @@ void stopSsh()
 {
     sshStop  = true;
     sshPhase = 0;
+    hostKeyDecision = 2;
     scr      = Scr::kList;
     dirty    = true;
 }
@@ -719,6 +862,8 @@ enum : uint32_t {
     kDelProf = 1u << 7,
     kLeft    = 1u << 8,
     kRight   = 1u << 9,
+    kClear   = 1u << 10,
+    kRetry   = 1u << 11,
 };
 
 uint32_t readActions()
@@ -736,6 +881,8 @@ uint32_t readActions()
             case 'd': case 'D': a |= kDelProf; break;
             case ',': a |= kLeft; break;
             case '/': a |= kRight; break;
+            case 'k': case 'K': a |= kClear; break;
+            case 'r': case 'R': a |= kRetry; break;
             default: break;
         }
     }
@@ -766,7 +913,11 @@ void beginEdit(int field)
     if (field == 2) {
         snprintf(editBuf, sizeof(editBuf), "%u", static_cast<unsigned>(p->port));
     } else {
-        const char* src = field == 0 ? p->name : field == 1 ? p->host : field == 3 ? p->user : p->pass;
+        const char* src = field == 0 ? p->name
+                          : field == 1 ? p->host
+                          : field == 3 ? p->user
+                          : field == 4 ? p->pass
+                                       : p->keyPath;
         copyCString(editBuf, sizeof(editBuf), src);
     }
     editLen = strlen(editBuf);
@@ -802,8 +953,10 @@ void finishEdit()
         copyCString(p->host, sizeof(p->host), editBuf);
     } else if (editField == 3) {
         copyCString(p->user, sizeof(p->user), editBuf);
-    } else {
+    } else if (editField == 4) {
         copyCString(p->pass, sizeof(p->pass), editBuf);
+    } else {
+        copyCString(p->keyPath, sizeof(p->keyPath), editBuf);
     }
     saveProfiles();
     scr   = Scr::kProfile;
@@ -873,6 +1026,66 @@ void handleEdit(uint32_t pressed)
     prevEnter = ks.enter;
 }
 
+void importKeyFromSd()
+{
+    if (!sdmount::ensure()) {
+        copyCString(note, sizeof(note), "NO TF CARD");
+        dirty = true;
+        return;
+    }
+    File src = SD.open("/ssh/id_ed25519", FILE_READ);
+    if (!src) src = SD.open("/id_ed25519", FILE_READ);
+    if (!src) {
+        copyCString(note, sizeof(note), "PUT KEY AT /ssh/id_ed25519");
+        dirty = true;
+        return;
+    }
+
+    SPIFFS.begin(true);
+    if (!SPIFFS.exists("/ssh")) SPIFFS.mkdir("/ssh");
+    File dst = SPIFFS.open("/ssh/id_ed25519", FILE_WRITE);
+    if (!dst) {
+        src.close();
+        copyCString(note, sizeof(note), "SPIFFS WRITE FAILED");
+        dirty = true;
+        return;
+    }
+    uint8_t buf[256];
+    while (src.available()) {
+        const int n = src.read(buf, sizeof(buf));
+        if (n <= 0) break;
+        dst.write(buf, n);
+    }
+    dst.close();
+    src.close();
+
+    // The public half is optional; copy it when present.
+    File pubSrc = SD.open("/ssh/id_ed25519.pub", FILE_READ);
+    if (pubSrc) {
+        File pubDst = SPIFFS.open("/ssh/id_ed25519.pub", FILE_WRITE);
+        if (pubDst) {
+            while (pubSrc.available()) {
+                const int n = pubSrc.read(buf, sizeof(buf));
+                if (n <= 0) break;
+                pubDst.write(buf, n);
+            }
+            pubDst.close();
+        }
+        pubSrc.close();
+    }
+
+    if (currentProfile() == nullptr) addProfile();
+    Profile* p = currentProfile();
+    if (p != nullptr) {
+        p->auth = 1;
+        copyCString(p->keyPath, sizeof(p->keyPath), "/spiffs/ssh/id_ed25519");
+        saveProfiles();
+    }
+    copyCString(note, sizeof(note), "KEY IMPORTED FROM TF");
+    Serial.println("[ssh] imported /ssh/id_ed25519 from TF");
+    dirty = true;
+}
+
 void handleList(uint32_t pressed)
 {
     const int total = profileCount + (profileCount < kMaxProfiles ? 1 : 0);
@@ -914,6 +1127,10 @@ void handleList(uint32_t pressed)
         dirty       = true;
         return;
     }
+    if (pressed & kClear) {
+        importKeyFromSd();
+        return;
+    }
     if (!(pressed & kEnter)) return;
 
     if (listSel >= profileCount) {
@@ -942,15 +1159,28 @@ void handleProfile(uint32_t pressed)
         return;
     }
     if (pressed & kUp) {
-        sel   = (sel + 5) % 6;
+        sel   = (sel + 6) % 7;
         dirty = true;
     }
     if (pressed & kDown) {
-        sel   = (sel + 1) % 6;
+        sel   = (sel + 1) % 7;
         dirty = true;
     }
     if (!(pressed & kEnter)) return;
-    if (sel == 5) {
+    Profile* p = currentProfile();
+    if (p == nullptr) return;
+    if (sel == 4) {
+        p->auth = p->auth == 0 ? 1 : 0;
+        saveProfiles();
+        dirty = true;
+    } else if (sel == 5) {
+        if (p->auth == 1) {
+            copyCString(note, sizeof(note), "KEY: /spiffs/ssh/id_ed25519");
+            dirty = true;
+        } else {
+            beginEdit(4);
+        }
+    } else if (sel == 6) {
         startWifiForSsh();
     } else {
         beginEdit(sel);
@@ -965,6 +1195,26 @@ void handleTerminal()
         stopSsh();
         return;
     }
+
+    // Opt + ;/. scrolls the history; ordinary ;/. still go to the shell.
+    uint8_t scroll = 0;
+    if (ks.opt) {
+        for (const auto& pos : M5Cardputer.Keyboard.keyList()) {
+            const uint8_t code =
+                static_cast<uint8_t>(M5Cardputer.Keyboard.getKeyValue(pos).value_first);
+            if (code == ';') scroll |= 1;
+            if (code == '.') scroll |= 2;
+        }
+    }
+    if (scroll != prevScroll) {
+        if (scroll & 1) ++termScroll;
+        if (scroll & 2) --termScroll;
+        if (termScroll < 0) termScroll = 0;
+        const int maxScroll = sshterm::historyCount();
+        if (termScroll > maxScroll) termScroll = maxScroll;
+        dirty = true;
+    }
+    prevScroll = scroll;
 
     // Fn+Q closes the session but leaves the SSH app open.
     for (char c : ks.word) {
@@ -1012,6 +1262,7 @@ void handleTerminal()
             continue;
         }
         if (ks.fn && (c == ';' || c == '.' || c == ',' || c == '/')) continue;
+        if (ks.opt && (c == ';' || c == '.')) continue;
         if (ks.fn && (c == 'q' || c == 'Q')) continue;
         if (c >= 32 && c < 127) {
             if (ks.ctrl && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
@@ -1037,7 +1288,37 @@ void handleError(uint32_t pressed)
         launcher::rebootInto(launcher::kAppMenu);
         return;
     }
+    if (pressed & kClear) {
+        SPIFFS.begin(true);
+        SPIFFS.remove("/ssh/known_hosts");
+        copyCString(note, sizeof(note), "KNOWN HOSTS CLEARED");
+        scr   = Scr::kList;
+        dirty = true;
+        return;
+    }
+    if (pressed & kRetry) {
+        if (!sshRunning) startWifiForSsh();
+        return;
+    }
     if (pressed & kEnter) {
+        scr   = Scr::kList;
+        dirty = true;
+    }
+}
+
+void handleHostKey(uint32_t pressed)
+{
+    if (pressed & kEnter) {
+        hostKeyDecision = 1;
+        scr             = Scr::kConnecting;
+        dirty           = true;
+        return;
+    }
+    if (pressed & kBack) {
+        hostKeyDecision = 2;
+        sshStop         = true;
+        sshPhase        = 0;
+        copyCString(note, sizeof(note), "HOST KEY REJECTED");
         scr   = Scr::kList;
         dirty = true;
     }
@@ -1097,9 +1378,14 @@ void loop()
     }
 
     // The task flips phases asynchronously; the UI only reacts to transitions.
-    if (sshPhase == 3 && scr != Scr::kTerminal) {
+    if (sshPhase == 6 && hostKeyDecision == 0 && scr != Scr::kHostKey) {
+        scr   = Scr::kHostKey;
+        dirty = true;
+    } else if (sshPhase == 3 && scr != Scr::kTerminal) {
         scr   = Scr::kTerminal;
         dirty = true;
+        termScroll = 0;
+        prevScroll = 0;
         resetEditEdges();
         prevArrow = 0;
         prevTab   = false;
@@ -1153,6 +1439,9 @@ void loop()
             break;
         case Scr::kError:
             handleError(pressed);
+            break;
+        case Scr::kHostKey:
+            handleHostKey(pressed);
             break;
     }
 

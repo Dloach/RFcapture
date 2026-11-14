@@ -5,9 +5,17 @@
 namespace sshterm {
 namespace {
 
-char screen[kRows][kCols + 1];
-int row = 0;
-int col = 0;
+constexpr int kHistoryRows = 64;
+
+Cell screen[kRows][kCols];
+Cell history[kHistoryRows][kCols];
+int histCount    = 0;
+int historyNext  = 0;
+int row          = 0;
+int col          = 0;
+uint8_t curFg    = 7;
+uint8_t curBg    = 0;
+bool reverse     = false;
 
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool dirty = true;
@@ -17,6 +25,11 @@ volatile bool dirty = true;
 int parserState = 0;  // 0 ground, 1 esc, 2 csi, 3 osc, 4 osc-esc
 char csiArgs[24];
 int csiLen = 0;
+
+// UTF-8 decode state (the cell stores one character; multi-byte glyphs are
+// mapped to an ASCII fallback).
+int utf8Need = 0;
+uint32_t utf8Code = 0;
 
 int parseNum(const char* s, int def)
 {
@@ -28,20 +41,34 @@ int parseNum(const char* s, int def)
 
 void blankRow(int r)
 {
-    memset(screen[r], ' ', kCols);
-    screen[r][kCols] = 0;
+    for (int c = 0; c < kCols; ++c) screen[r][c] = Cell{' ', 7, 0};
 }
 
 void clearLocked()
 {
     for (int r = 0; r < kRows; ++r) blankRow(r);
-    row = 0;
-    col = 0;
+    row      = 0;
+    col      = 0;
+    curFg    = 7;
+    curBg    = 0;
+    reverse  = false;
+    histCount = 0;
+    historyNext  = 0;
+    utf8Need     = 0;
+    utf8Code     = 0;
+}
+
+void pushHistory(const Cell* line)
+{
+    memcpy(history[historyNext], line, sizeof(history[historyNext]));
+    historyNext = (historyNext + 1) % kHistoryRows;
+    if (histCount < kHistoryRows) ++histCount;
 }
 
 void scrollLocked()
 {
-    for (int r = 1; r < kRows; ++r) memcpy(screen[r - 1], screen[r], kCols + 1);
+    pushHistory(screen[0]);
+    for (int r = 1; r < kRows; ++r) memcpy(screen[r - 1], screen[r], sizeof(screen[r]));
     blankRow(kRows - 1);
     row = kRows - 1;
 }
@@ -50,6 +77,18 @@ void newlineLocked()
 {
     col = 0;
     if (++row >= kRows) scrollLocked();
+}
+
+void putCellLocked(char c)
+{
+    uint8_t fg = curFg;
+    uint8_t bg = curBg;
+    if (reverse) {
+        const uint8_t t = fg;
+        fg              = bg;
+        bg              = t;
+    }
+    screen[row][col++] = Cell{c, fg, bg};
 }
 
 void putLocked(char c)
@@ -73,11 +112,72 @@ void putLocked(char c)
     }
     if (static_cast<unsigned char>(c) < 32) return;
     if (col >= kCols) newlineLocked();
-    screen[row][col++] = c;
+    putCellLocked(c);
 }
 
-// Minimal VT100: enough for a shell, ls, nano and most prompts.  Unknown CSI
-// finals are ignored, which is safer than dumping escape text on the panel.
+// ASCII fallback for the box-drawing characters used by ncurses/htop.  The
+// panel font is 6x8; replacing them keeps menus readable instead of showing
+// replacement boxes.
+void putCodepointLocked(uint32_t cp)
+{
+    char c = '?';
+    if (cp >= 0x2500 && cp <= 0x257f) {
+        if (cp == 0x2502 || cp == 0x2503) c = '|';
+        else if (cp == 0x2500 || cp == 0x2501) c = '-';
+        else c = '+';
+    } else if (cp >= 0x2580 && cp <= 0x259f) {
+        c = '#';
+    } else if (cp == 0x2026) {
+        c = '.';
+    } else if (cp == 0x00a0) {
+        c = ' ';
+    } else if (cp < 0x80) {
+        c = static_cast<char>(cp);
+    }
+    if (col >= kCols) newlineLocked();
+    putCellLocked(c);
+}
+
+void applySgrLocked(const char* args)
+{
+    int values[8];
+    int n = 0;
+    const char* p = args;
+    while (n < 8) {
+        values[n++] = parseNum(p, 0);
+        const char* semi = strchr(p, ';');
+        if (semi == nullptr) break;
+        p = semi + 1;
+    }
+    if (n == 0) values[n++] = 0;
+    for (int i = 0; i < n; ++i) {
+        const int v = values[i];
+        if (v == 0) {
+            curFg   = 7;
+            curBg   = 0;
+            reverse = false;
+        } else if (v == 1) {
+            curFg |= 8;
+        } else if (v == 7) {
+            reverse = true;
+        } else if (v == 27) {
+            reverse = false;
+        } else if (v == 39) {
+            curFg = 7;
+        } else if (v == 49) {
+            curBg = 0;
+        } else if (v >= 30 && v <= 37) {
+            curFg = static_cast<uint8_t>(v - 30);
+        } else if (v >= 40 && v <= 47) {
+            curBg = static_cast<uint8_t>(v - 40);
+        } else if (v >= 90 && v <= 97) {
+            curFg = static_cast<uint8_t>(v - 90 + 8);
+        } else if (v >= 100 && v <= 107) {
+            curBg = static_cast<uint8_t>(v - 100 + 8);
+        }
+    }
+}
+
 void csiFinalLocked(char final, const char* args)
 {
     if (final == 'A') {
@@ -119,16 +219,16 @@ void csiFinalLocked(char final, const char* args)
         if (col >= kCols) col = kCols - 1;
     } else if (final == 'J') {
         if (parseNum(args, 0) == 2 || args[0] == 0) {
-            clearLocked();
+            for (int r = 0; r < kRows; ++r) blankRow(r);
         } else {
-            for (int c = col; c < kCols; ++c) screen[row][c] = ' ';
+            for (int c = col; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
             for (int r = row + 1; r < kRows; ++r) blankRow(r);
         }
     } else if (final == 'K') {
         if (parseNum(args, 0) == 2) {
-            for (int c = 0; c < kCols; ++c) screen[row][c] = ' ';
+            for (int c = 0; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
         } else {
-            for (int c = col; c < kCols; ++c) screen[row][c] = ' ';
+            for (int c = col; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
         }
     } else if (final == 'S') {
         for (int n = parseNum(args, 1); n > 0; --n) scrollLocked();
@@ -136,15 +236,48 @@ void csiFinalLocked(char final, const char* args)
         col = 0;
     } else if (final == 'T') {
         for (int n = parseNum(args, 1); n > 0; --n) {
-            for (int r = kRows - 1; r > 0; --r) memcpy(screen[r], screen[r - 1], kCols + 1);
+            for (int r = kRows - 1; r > 0; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
             blankRow(0);
         }
         row = kRows - 1;
         col = 0;
-    } else if (final == 'm' || final == 'r' || final == 'h' || final == 'l' ||
-               final == 'L' || final == 'M' || final == 'P' || final == '@') {
-        // SGR / scroll region / mode / insert-delete: no-op for this panel.
+    } else if (final == 'm') {
+        applySgrLocked(args);
+    } else if ((final == 'h' || final == 'l') && strstr(args, "1049") != nullptr) {
+        // Alternate screen: clear both directions.  A full saved main screen is
+        // not worth the RAM on this panel.
+        for (int r = 0; r < kRows; ++r) blankRow(r);
+        row = 0;
+        col = 0;
     }
+}
+
+void feedGroundLocked(char c)
+{
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (uc < 0x80) {
+        putLocked(c);
+        return;
+    }
+    if (utf8Need == 0) {
+        if ((uc & 0xE0) == 0xC0) {
+            utf8Need = 1;
+            utf8Code = uc & 0x1F;
+        } else if ((uc & 0xF0) == 0xE0) {
+            utf8Need = 2;
+            utf8Code = uc & 0x0F;
+        } else if ((uc & 0xF8) == 0xF0) {
+            utf8Need = 3;
+            utf8Code = uc & 0x07;
+        }
+        return;
+    }
+    if ((uc & 0xC0) != 0x80) {
+        utf8Need = 0;
+        return;
+    }
+    utf8Code = (utf8Code << 6) | (uc & 0x3F);
+    if (--utf8Need == 0) putCodepointLocked(utf8Code);
 }
 
 }  // namespace
@@ -156,7 +289,7 @@ void clear()
     parserState = 0;
     csiLen      = 0;
     csiArgs[0]  = 0;
-    dirty = true;
+    dirty       = true;
     portEXIT_CRITICAL(&mux);
 }
 
@@ -168,8 +301,8 @@ void feed(const char* data, int len)
         if (parserState == 0) {
             if (c == 0x1b) {
                 parserState = 1;
-            } else if (static_cast<unsigned char>(c) < 0x80) {
-                putLocked(c);
+            } else {
+                feedGroundLocked(c);
             }
         } else if (parserState == 1) {
             if (c == '[') {
@@ -196,8 +329,6 @@ void feed(const char* data, int len)
                 parserState = 4;
             }
         } else if (parserState == 4) {
-            // ESC \ terminates an OSC string; either way the next byte starts
-            // a fresh ground state.
             parserState = 0;
         }
     }
@@ -205,11 +336,35 @@ void feed(const char* data, int len)
     portEXIT_CRITICAL(&mux);
 }
 
-void snapshot(char out[kRows][kCols + 1])
+void snapshot(Cell out[kRows][kCols], int scrollOffset)
 {
     portENTER_CRITICAL(&mux);
-    memcpy(out, screen, sizeof(screen));
+    int offset = scrollOffset;
+    if (offset < 0) offset = 0;
+    if (offset > histCount) offset = histCount;
+
+    const int total = histCount + kRows;
+    int start = total - kRows - offset;
+    if (start < 0) start = 0;
+    for (int r = 0; r < kRows; ++r) {
+        const int logical = start + r;
+        if (logical < histCount) {
+            const int idx = (historyNext - histCount + logical + kHistoryRows) % kHistoryRows;
+            memcpy(out[r], history[idx], sizeof(out[r]));
+        } else {
+            memcpy(out[r], screen[logical - histCount], sizeof(out[r]));
+        }
+    }
     portEXIT_CRITICAL(&mux);
+}
+
+int historyCount()
+{
+    int n;
+    portENTER_CRITICAL(&mux);
+    n = histCount;
+    portEXIT_CRITICAL(&mux);
+    return n;
 }
 
 bool takeDirty()

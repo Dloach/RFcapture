@@ -839,23 +839,25 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 | Phase 2 WiFi 边界 | 🟡 | 外网 TCP 测试已加；WPA3/企业级/隐藏 SSID 尚未逐项实测 |
 | Phase 3 SSH spike | ✅ | LibSSH-ESP32 5.10.0 在 core 2.0.17 编译、登录成功 |
 | Phase 4 SSH MVP | ✅ | 密码认证、host key TOFU、40×13 终端 |
-| Phase 5 SSH 完善 | 🟡 | 多 profile（最多 4）与光标编辑已完成；Ed25519、host key 交互确认、ANSI 补全待做 |
+| Phase 5 SSH 完善 | 🟡 | 多 profile、光标编辑、host key 指纹确认、Ed25519 key、ANSI 16 色/UTF-8 回退/64 行历史、keepalive/超时/R 重试已完成；加密 key、自动无限重连、完整备用屏待做 |
 
 与本文原计划的偏差（以代码为准）：
 
 - 第一版 SSH profile 存在 **NVS `ssh`**，不是 SPIFFS `profiles.txt`；
   当前最多 4 个（`nameN/hostN/portN/userN/passN`），旧的单 profile 键会自动迁移到 profile 0。
 - SSH 密码默认保存到 NVS `ssh/passN`（每个 profile 一份）；明文存储。
-- host key 首次连接**自动接受并写入** known_hosts，没有做“是否信任”交互；
-  变更时仍会报 `HOST KEY CHANGED`。
-- 终端只实现 `ssh_terminal.cpp` 的基本 VT100 子集；没有备用屏/颜色/滚动历史。
+- host key 首次连接**显示 SHA256 并交互确认**；变更时仍会报
+  `HOST KEY CHANGED`，错误页 `K` 清空 known_hosts、`R` 重试。
+- 终端支持 ANSI 16 色、UTF-8 ASCII 回退、64 行历史（`Opt+; .`）；
+  备用屏仍只清屏，不保存主屏。
+- SSH 连接超时 15 s，keepalive 30 s；没有无限自动重连，错误页 `R` 手动重试。
+- 详细使用说明见 `docs/SSH.md`。
 - WiFi 从 SETTINGS 返回 launcher 走**软返回**，保留 WiFi 栈；这是为了让
   launcher header 图标反映真实连接状态。
 
 下一步优先级：
 
-1. SSH 多 profile（NVS 或 SPIFFS，带迁移）；
-2. Ed25519 key 认证 + host key 交互确认；
-3. 终端 ANSI 补全（备用屏/SGR/滚动历史）；
-4. WiFi WPA3/隐藏 SSID/忘记网络确认；
-5. 补 `LICENSE`、`docs/THIRD-PARTY.md` 与 LGPL 可重链接发布包。
+1. Ed25519 加密私钥/RSA key（可选）与 host key 单条删除；
+2. 自动重连/断线恢复、终端完整备用屏；
+3. WiFi WPA3/隐藏 SSID/忘记网络确认；
+4. 补 `LICENSE`、LGPL 可重链接发布包。

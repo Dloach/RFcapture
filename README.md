@@ -39,10 +39,12 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - `TEST CONNECTION` 用 `example.com:80` 验证 DNS/外网 TCP。
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
-  - 最多 4 个 profile（NAME / HOST / PORT / USER / PASSWORD），`+ NEW PROFILE` 新建；
-  - 密码认证、首次连接自动记录 host key；
+  - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；
+  - PASSWORD 或 Ed25519 key（TF 导入），首次 host key 显示 SHA256 指纹确认；
   - 编辑页 `, /` 移光标、光标处插入、闪烁 `_`；
-  - 40×13 终端，`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。
+  - 40×13 终端，ANSI 16 色、UTF-8 回退、64 行历史，`Opt+; .` 翻页；
+  - 15 s 超时、30 s keepalive；`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。
+  - 使用说明见 [docs/SSH.md](docs/SSH.md)。
 
 > 实测：315 MHz EV1527 遥控器（T≈500 µs）采集 → 保存 → 回放，铁门正常动作；
 > 门卡 `3C02B611` 的模拟已验证能开门。**码值一样不代表波形一样好**：`q40` 以下
@@ -141,6 +143,7 @@ cardputer/
     ├── PLAN-fix-2026-11-12.md  修复计划与执行记录
     ├── PLAN-keyboard-next.md   键盘功能的执行计划
     ├── PLAN-wifi-ssh.md        WiFi Settings + SSH 客户端开发计划
+    ├── SSH.md                  SSH profile / host key / key 导入 / 终端说明
     ├── THIRD-PARTY.md          第三方组件与 LGPL 注意事项
     └── RESEARCH-keyboard.md    键盘调研
 ```
