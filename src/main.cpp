@@ -23,6 +23,7 @@
 #include "launcher.h"
 #include "nfc_app.h"
 #include "rf_config.h"
+#include "rflab_app.h"
 #include "settings_app.h"
 #include "ssh_app.h"
 #include "ui_prefs.h"
@@ -31,7 +32,7 @@
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk };
+enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk };
 
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
@@ -74,6 +75,11 @@ void setup()
             g_running = Running::kRf;
             g_rf      = new App();
             g_rf->begin();
+            break;
+
+        case launcher::kAppRfLab:
+            g_running = Running::kRfLab;
+            rflabapp::setup();
             break;
 
         case launcher::kAppNfc:
@@ -134,6 +140,9 @@ void loop()
     switch (g_running) {
         case Running::kRf:
             if (g_rf) g_rf->update();
+            break;
+        case Running::kRfLab:
+            rflabapp::loop();
             break;
         case Running::kNfc:
             nfcapp::loop();

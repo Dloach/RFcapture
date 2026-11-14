@@ -28,6 +28,8 @@ enum class RfProtocol : uint8_t {
     kUnknown = 0,
     kEv1527  = 1,  // 24 bit fixed code (most 铁闸 / 卷帘门 remotes)
     kPt2262  = 2,  // 12 tri-state symbols
+    kCame    = 3,  // 12 bit PWM, 320 us-class timing
+    kNice    = 4,  // 12 bit PWM, 700 us-class timing
 };
 
 struct Decoded {

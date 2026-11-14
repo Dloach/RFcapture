@@ -224,6 +224,8 @@ const char* protocolName(RfProtocol proto)
     switch (proto) {
         case RfProtocol::kEv1527: return "EV1527";
         case RfProtocol::kPt2262: return "PT2262";
+        case RfProtocol::kCame: return "CAME";
+        case RfProtocol::kNice: return "NICE";
         default: return "RAW";
     }
 }

@@ -8,7 +8,8 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 八功能 **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / FILES / BADUSB / USB DISK / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；BACKUP、DISPLAY/POWER 在 SETTINGS 内 |
+| 功能结构 | launcher 九功能 **RF TOOLS / RF LAB / NFC TOOLS / KEYBOARD / SSH / FILES / BADUSB / USB DISK / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；BACKUP、DISPLAY/POWER 在 SETTINGS 内 |
+| RF LAB | 频谱瀑布、`.sub` 导入导出、EV1527/PT2262/CAME/Nice 生成、包络调制分析、信号编辑/重发/频偏；详见 `docs/RF-LAB.md` |
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已移入 SETTINGS |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | FILES | TF/SPIFFS 浏览、文本查看、双击 D 删除文件；不递归删目录 |

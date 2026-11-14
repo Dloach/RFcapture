@@ -34,6 +34,7 @@ enum App : uint8_t {
     kAppFiles    = 7,  // TF/SPIFFS file browser
     kAppBadUsb   = 8,  // DuckyScript over USB HID
     kAppUsbDisk  = 9,  // TF card as USB MSC drive
+    kAppRfLab    = 10, // spectrum / sub import / generator / modulation lab
 };
 
 /// Which app this boot belongs to (from NVS).

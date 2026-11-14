@@ -5,13 +5,14 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
 - **RF**：采集、保存并重发铁门 / 卷帘门 / 道闸等 OOK 遥控器（EV1527 / PT2262 固定码）；
 - **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）；
 - **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）；
+- **RF LAB**：频谱瀑布、`.sub` 导入导出、固定码生成/枚举、调制包络分析、信号编辑/重发/频偏；
 - **SETTINGS**：WiFi 扫描/保存、OTA 无线烧录、TF 备份/恢复、亮度/超时/电池；
 - **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端；
 - **FILES**：TF / SPIFFS 文件浏览、文本查看、删除；
 - **BADUSB**：从 TF 读取 DuckyScript 子集，作为 USB HID 键盘执行；
 - **USB DISK**：把整张 TF 卡作为 USB MSC 盘暴露给电脑。
 
-系统是 launcher 八功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 九功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -91,14 +92,17 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
 Windows：
 
 ```powershell
-pio run -e cardputer-adv -t upload --upload-port COM13
-.\tools\run-device.ps1 -Port COM13
+powershell -ExecutionPolicy Bypass -File .\tools\flash.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\flash.ps1 -Port COM13
 ```
 
-> **USB mode 0（键盘功能）**：从这一版起，USB 是 TinyUSB 复合设备（HID + CDC），
-> 不再是硬件 CDC/JTAG。运行口/VID:PID 会变，烧录使用 1200bps touch；如果 Windows
-> 找不到新口，按住键盘左上角 **G0** 再插 USB 进 ROM 下载模式，用 `esptool` 直接写。
-> 具体 COM 号以 `pio device list` 为准。
+`tools/flash.ps1` 先尝试有线。**没有检测到 Cardputer 的 303A 口时它会停止**，
+并提示你打开 `SETTINGS → OTA UPDATE`，不会无限重试一个不存在的 COM。
+
+> **USB mode 0**：USB 是 TinyUSB 复合设备（CDC + HID，USB DISK 模式另有 MSC）。
+> CDC 现在由 app 注册、main 手动 `USB.begin()` 启动；运行口/VID:PID 会变，烧录使用
+> 1200bps touch。如果 Windows 找不到新口，按住键盘左上角 **G0** 再插 USB 进 ROM
+> 下载模式，用 `esptool` 直接写。具体 COM 号以 `pio device list` 为准。
 
 macOS / Linux：
 
@@ -119,7 +123,7 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 - NFC 扫描：`S` 开始/停止；
 - KEYBOARD 模式页：`ENT` 进入选中模式、`esc` 回 launcher；
 - KEYBOARD 工作页：`Fn+BKSP` 回 KEYBOARD 菜单；`Fn+`` = Esc；`Opt` = Win。
-- launcher：`; .` 上下滚动八项；`ENT` 进入；右侧九宫格照旧。
+- launcher：`; .` 上下滚动九项；`ENT` 进入；右侧九宫格照旧。
 - SETTINGS / WIFI：`S` 扫描，`ENT` 选择，密码页 `ENT` 连接、`BKSP` 删除、
   `Fn+BKSP` 取消；`TEST CONNECTION` 验证外网 TCP。
 - SSH：`; .` 选字段，`ENT` 编辑/连接；终端里 `Fn+; . , /` = 方向键，
@@ -133,7 +137,7 @@ cardputer/
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
-│   ├── launcher.*              launcher 八功能（滚动）+ 九宫格
+│   ├── launcher.*              launcher 九功能（滚动）+ 九宫格
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
 │   ├── nfc_app.*               NFC 读卡 / 列表 / 模拟
 │   ├── nfc_cards.*             NFC 卡库（SPIFFS + TF 备份）
@@ -170,6 +174,7 @@ cardputer/
     ├── SSH.md                  SSH profile / host key / 终端说明
     ├── OTA.md                  无线烧录步骤与故障排查
     ├── LOCAL.md                FILES / BADUSB / 显示与电源
+    ├── RF-LAB.md               频谱 / .sub / 生成 / 调制分析 / 编辑
     ├── THIRD-PARTY.md          第三方组件与 LGPL 注意事项
     └── RESEARCH-keyboard.md    键盘调研
 ```
