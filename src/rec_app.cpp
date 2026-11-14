@@ -283,12 +283,20 @@ void beginMic()
     delay(100);
     auto mc = M5.Mic.config();
     mc.sample_rate = kRate;
-    mc.magnification = 64;
+    mc.magnification = 16;  // keep digital gain at 1x; use ES8311 analog PGA
     M5.Mic.config(mc);
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
         delay(1200);
+        // M5Unified's Cardputer ADV callback leaves the ES8311 PGA at minimum
+        // (reg 0x14=0x10, 0x17=0xBF ~0 dB).  Use the Stopwatch profile:
+        // PGA +21 dB (0x17) and ADC +6 dB (0xCB) before the ADC, which is much
+        // cleaner than multiplying 16-bit samples afterwards.
+        const bool g1 = M5.In_I2C.writeRegister8(0x18, 0x14, 0x17, 100000);
+        const bool g2 = M5.In_I2C.writeRegister8(0x18, 0x17, 0xCB, 100000);
+        const bool g3 = M5.In_I2C.writeRegister8(0x18, 0x1C, 0x64, 100000);
+        Serial.printf("[rec] es8311 gain=%d%d%d\n", g1, g2, g3);
     }
     Serial.printf("[rec] mic=%d gain=%d\n", micOk ? 1 : 0, mc.magnification);
 }
