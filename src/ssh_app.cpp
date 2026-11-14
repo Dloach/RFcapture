@@ -35,16 +35,21 @@ constexpr int kFooterY = 118;
 auto& lcd = M5Cardputer.Display;
 
 struct Profile {
+    char name[20] = {0};
     char host[64] = {0};
     char user[32] = {0};
     char pass[64] = {0};
     uint16_t port = 22;
 };
 
-Profile profile;
+constexpr int kMaxProfiles = 4;
+Profile profiles[kMaxProfiles];
+int profileCount = 0;
+int current      = 0;
 bool profileLoaded = false;
 
 enum class Scr : uint8_t {
+    kList,
     kProfile,
     kEdit,
     kWifiWait,
@@ -52,9 +57,12 @@ enum class Scr : uint8_t {
     kTerminal,
     kError,
 };
-Scr scr = Scr::kProfile;
+Scr scr = Scr::kList;
 bool dirty = true;
 int sel = 0;
+int listSel = 0;
+bool deleteArmed = false;
+uint32_t deleteAt = 0;
 
 char note[64] = {0};
 bool wifiConnecting = false;
@@ -77,6 +85,9 @@ uint16_t connectPort = 22;
 int editField = 0;
 char editBuf[64] = {0};
 int editLen = 0;
+int editPos = 0;
+bool editCursorOn = true;
+uint32_t editCursorMs = 0;
 std::vector<char> prevWord;
 bool prevDel = false;
 bool prevEnter = false;
@@ -150,40 +161,114 @@ void copyCString(char* dst, size_t cap, const char* src)
 }
 
 // ---------------------------------------------------------------------------
-// Profile persistence (one profile for the MVP; the NVS keys are already
-// namespaced so a multi-profile list can be added without touching WiFi).
+// Profile persistence: NVS holds up to four profiles.  The first version
+// stored a single host/user/pass/port; loadProfiles() migrates that into
+// profile 0 so an existing SSH setup survives the upgrade.
 // ---------------------------------------------------------------------------
-void loadProfile()
+Profile* currentProfile()
+{
+    if (profileCount <= 0) return nullptr;
+    if (current < 0 || current >= profileCount) current = 0;
+    return &profiles[current];
+}
+
+void loadProfiles()
 {
     if (profileLoaded) return;
     profileLoaded = true;
+    current       = 0;
     Preferences p;
     if (!p.begin("ssh", true)) return;
-    copyString(profile.host, sizeof(profile.host), p.getString("host", ""));
-    copyString(profile.user, sizeof(profile.user), p.getString("user", ""));
-    copyString(profile.pass, sizeof(profile.pass), p.getString("pass", ""));
-    profile.port = p.getUShort("port", 22);
+
+    int n = p.getUChar("count", 0);
+    if (n <= 0) {
+        char host[64];
+        copyString(host, sizeof(host), p.getString("host", ""));
+        if (host[0] != 0) {
+            copyCString(profiles[0].name, sizeof(profiles[0].name), "DEFAULT");
+            copyString(profiles[0].host, sizeof(profiles[0].host), host);
+            copyString(profiles[0].user, sizeof(profiles[0].user), p.getString("user", ""));
+            copyString(profiles[0].pass, sizeof(profiles[0].pass), p.getString("pass", ""));
+            profiles[0].port = p.getUShort("port", 22);
+            if (profiles[0].port == 0) profiles[0].port = 22;
+            profileCount = 1;
+        }
+        p.end();
+        return;
+    }
+
+    if (n > kMaxProfiles) n = kMaxProfiles;
+    for (int i = 0; i < n; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "name%d", i);
+        copyString(profiles[i].name, sizeof(profiles[i].name), p.getString(key, ""));
+        snprintf(key, sizeof(key), "host%d", i);
+        copyString(profiles[i].host, sizeof(profiles[i].host), p.getString(key, ""));
+        snprintf(key, sizeof(key), "user%d", i);
+        copyString(profiles[i].user, sizeof(profiles[i].user), p.getString(key, ""));
+        snprintf(key, sizeof(key), "pass%d", i);
+        copyString(profiles[i].pass, sizeof(profiles[i].pass), p.getString(key, ""));
+        snprintf(key, sizeof(key), "port%d", i);
+        profiles[i].port = p.getUShort(key, 22);
+        if (profiles[i].port == 0) profiles[i].port = 22;
+        if (profiles[i].name[0] == 0) snprintf(profiles[i].name, sizeof(profiles[i].name), "PROFILE %d", i + 1);
+    }
+    profileCount = n;
+    current      = p.getUChar("current", 0);
+    if (current < 0 || current >= profileCount) current = 0;
     p.end();
-    if (profile.port == 0) profile.port = 22;
 }
 
-void saveProfile()
+void saveProfiles()
 {
     Preferences p;
     if (!p.begin("ssh", false)) return;
-    p.putString("host", profile.host);
-    p.putString("user", profile.user);
-    p.putString("pass", profile.pass);
-    p.putUShort("port", profile.port);
+    p.putUChar("count", static_cast<uint8_t>(profileCount));
+    p.putUChar("current", static_cast<uint8_t>(current < 0 ? 0 : current));
+    for (int i = 0; i < kMaxProfiles; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "name%d", i);
+        p.putString(key, i < profileCount ? profiles[i].name : "");
+        snprintf(key, sizeof(key), "host%d", i);
+        p.putString(key, i < profileCount ? profiles[i].host : "");
+        snprintf(key, sizeof(key), "user%d", i);
+        p.putString(key, i < profileCount ? profiles[i].user : "");
+        snprintf(key, sizeof(key), "pass%d", i);
+        p.putString(key, i < profileCount ? profiles[i].pass : "");
+        snprintf(key, sizeof(key), "port%d", i);
+        p.putUShort(key, i < profileCount ? profiles[i].port : 0);
+    }
     p.end();
-    Serial.printf("[ssh] profile saved host='%s' user='%s' port=%u\n", profile.host,
-                  profile.user, static_cast<unsigned>(profile.port));
+    Serial.printf("[ssh] profiles saved count=%d current=%d\n", profileCount, current);
+}
+
+bool addProfile()
+{
+    if (profileCount >= kMaxProfiles) return false;
+    Profile& p = profiles[profileCount];
+    p = Profile();
+    snprintf(p.name, sizeof(p.name), "PROFILE %d", profileCount + 1);
+    p.port = 22;
+    current = profileCount++;
+    saveProfiles();
+    return true;
+}
+
+void deleteProfile(int index)
+{
+    if (index < 0 || index >= profileCount) return;
+    for (int i = index; i < profileCount - 1; ++i) profiles[i] = profiles[i + 1];
+    --profileCount;
+    profiles[profileCount] = Profile();
+    if (current >= profileCount) current = profileCount > 0 ? profileCount - 1 : 0;
+    if (current < 0) current = 0;
+    saveProfiles();
 }
 
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
-void drawProfile()
+void drawList()
 {
     lcd.fillScreen(kBg);
     header("SSH");
@@ -193,37 +278,83 @@ void drawProfile()
     lcd.drawString(wifi ? "WIFI CONNECTED" : (wifiConnecting ? "WIFI CONNECTING..." : "WIFI OFF"), 6,
                    16);
 
-    const int rows = 5;
-    for (int i = 0; i < rows; ++i) {
+    const int total = profileCount + (profileCount < kMaxProfiles ? 1 : 0);
+    for (int i = 0; i < total; ++i) {
         const int y = 30 + i * 15;
+        if (i == listSel) lcd.fillRect(2, y - 2, lcd.width() - 4, 13, kBar);
+        const uint16_t bg = i == listSel ? kBar : kBg;
+        const uint16_t fg = i == listSel ? kAccent : kText;
+        lcd.setTextColor(fg, bg);
+        if (i < profileCount) {
+            char line[28];
+            snprintf(line, sizeof(line), "%c %.18s", i == current ? '*' : ' ', profiles[i].name);
+            lcd.drawString(line, 6, y);
+        } else {
+            lcd.drawString("+ NEW PROFILE", 6, y);
+        }
+    }
+
+    if (note[0]) {
+        lcd.setTextColor(kWarn, kBg);
+        char line[40];
+        snprintf(line, sizeof(line), "%.38s", note);
+        lcd.drawString(line, 6, 104);
+    }
+
+    static const Hint h[] = {{"ENT", "open"}, {"E", "edit"}, {"D", "del"}, {"esc", "back"}};
+    hints(h, 4);
+}
+
+void drawProfile()
+{
+    lcd.fillScreen(kBg);
+    header("SSH PROFILE");
+
+    Profile* p = currentProfile();
+    if (p == nullptr) {
+        lcd.setTextColor(kDim, kBg);
+        lcd.drawString("No profile. Go back and choose NEW PROFILE.", 6, 40);
+        static const Hint h[] = {{"esc", "back"}};
+        hints(h, 1);
+        return;
+    }
+
+    const int rows = 6;
+    for (int i = 0; i < rows; ++i) {
+        const int y = 26 + i * 14;
         if (i == sel) lcd.fillRect(2, y - 2, lcd.width() - 4, 13, kBar);
         const uint16_t bg = i == sel ? kBar : kBg;
         const uint16_t fg = i == sel ? kAccent : kText;
         lcd.setTextColor(fg, bg);
         if (i == 0) {
-            lcd.drawString("HOST", 6, y);
-            char val[30];
-            snprintf(val, sizeof(val), "%.26s", profile.host[0] ? profile.host : "(empty)");
+            lcd.drawString("NAME", 6, y);
+            char val[24];
+            snprintf(val, sizeof(val), "%.18s", p->name[0] ? p->name : "(empty)");
             lcd.drawString(val, 58, y);
         } else if (i == 1) {
+            lcd.drawString("HOST", 6, y);
+            char val[30];
+            snprintf(val, sizeof(val), "%.26s", p->host[0] ? p->host : "(empty)");
+            lcd.drawString(val, 58, y);
+        } else if (i == 2) {
             char port[8];
-            snprintf(port, sizeof(port), "%u", static_cast<unsigned>(profile.port));
+            snprintf(port, sizeof(port), "%u", static_cast<unsigned>(p->port));
             lcd.drawString("PORT", 6, y);
             lcd.drawString(port, 58, y);
-        } else if (i == 2) {
+        } else if (i == 3) {
             lcd.drawString("USER", 6, y);
             char val[30];
-            snprintf(val, sizeof(val), "%.26s", profile.user[0] ? profile.user : "(empty)");
+            snprintf(val, sizeof(val), "%.26s", p->user[0] ? p->user : "(empty)");
             lcd.drawString(val, 58, y);
-        } else if (i == 3) {
+        } else if (i == 4) {
             char stars[24];
-            const int n = strlen(profile.pass);
+            const int n = strlen(p->pass);
             const int show = n < 20 ? n : 20;
             for (int k = 0; k < show; ++k) stars[k] = '*';
             if (show == 20) stars[19] = '+';
             stars[show] = 0;
             lcd.drawString("PASS", 6, y);
-            lcd.drawString(profile.pass[0] ? stars : "(empty)", 58, y);
+            lcd.drawString(p->pass[0] ? stars : "(empty)", 58, y);
         } else {
             lcd.setTextColor(kOk, bg);
             lcd.drawString("CONNECT", 6, y);
@@ -232,44 +363,44 @@ void drawProfile()
         }
     }
 
-    static const Hint h[] = {{"; .", "move"}, {"ENT", "edit/connect"}, {"esc", "back"}};
+    static const Hint h[] = {{"; .", "move"}, {"ENT", "edit/connect"}, {"esc", "list"}};
     hints(h, 3);
+}
+
+void drawEditLine()
+{
+    char shown[44];
+    int n      = 0;
+    int start  = 0;
+    const int maxShow = 34;
+    if (editPos > maxShow - 2) start = editPos - (maxShow - 2);
+    for (int i = start; i <= editLen && n < (int)sizeof(shown) - 1; ++i) {
+        if (i == editPos) shown[n++] = editCursorOn ? '_' : ' ';
+        if (i < editLen && n < (int)sizeof(shown) - 1) {
+            shown[n++] = (editField == 4) ? '*' : editBuf[i];
+        }
+    }
+    shown[n] = 0;
+
+    lcd.fillRect(0, 40, lcd.width(), 24, kBg);
+    lcd.setTextColor(kText, kBg);
+    lcd.drawString(shown, 6, 42);
 }
 
 void drawEdit()
 {
     lcd.fillScreen(kBg);
-    const char* titles[] = {"EDIT HOST", "EDIT PORT", "EDIT USER", "EDIT PASSWORD"};
+    const char* titles[] = {"EDIT NAME", "EDIT HOST", "EDIT PORT", "EDIT USER", "EDIT PASSWORD"};
     header(titles[editField]);
-
-    char shown[44];
-    int n = 0;
-    if (editField == 3) {
-        const int maxShow = 32;
-        if (editLen > maxShow) {
-            shown[n++] = '.';
-            shown[n++] = '.';
-            shown[n++] = '.';
-            for (int i = editLen - (maxShow - 3); i < editLen; ++i) shown[n++] = '*';
-        } else {
-            for (int i = 0; i < editLen; ++i) shown[n++] = '*';
-        }
-    } else {
-        for (int i = 0; i < editLen; ++i) shown[n++] = editBuf[i];
-    }
-    shown[n++] = '_';
-    shown[n]   = 0;
-
-    lcd.setTextColor(kText, kBg);
-    lcd.drawString(shown, 6, 42);
+    drawEditLine();
 
     char count[32];
-    snprintf(count, sizeof(count), "LEN %d", editLen);
+    snprintf(count, sizeof(count), "LEN %d  POS %d", editLen, editPos);
     lcd.setTextColor(kDim, kBg);
     lcd.drawString(count, 6, 64);
-    if (editField == 1) lcd.drawString("1-65535", 6, 78);
+    if (editField == 2) lcd.drawString("1-65535", 6, 78);
 
-    static const Hint h[] = {{"ENT", "save"}, {"BKSP", "delete"}, {"FN BKSP", "cancel"}};
+    static const Hint h[] = {{"ENT", "save"}, {", /", "cursor"}, {"FN BKSP", "cancel"}};
     hints(h, 3);
 }
 
@@ -339,15 +470,16 @@ void drawError()
     lcd.drawString(msg, 6, 30);
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("Check profile, WiFi, host key.", 6, 58);
-    lcd.drawString("ENT: profile   esc: launcher", 6, 76);
+    lcd.drawString("ENT: list   esc: launcher", 6, 76);
 
-    static const Hint h[] = {{"ENT", "profile"}, {"esc", "launcher"}};
+    static const Hint h[] = {{"ENT", "list"}, {"esc", "launcher"}};
     hints(h, 2);
 }
 
 void drawCurrent()
 {
     switch (scr) {
+        case Scr::kList: drawList(); break;
         case Scr::kProfile: drawProfile(); break;
         case Scr::kEdit: drawEdit(); break;
         case Scr::kWifiWait: drawWifiWait(); break;
@@ -476,17 +608,18 @@ done:
 bool startSsh()
 {
     if (sshRunning) return true;
-    if (profile.host[0] == 0) {
+    Profile* p = currentProfile();
+    if (p == nullptr || p->host[0] == 0) {
         copyCString(note, sizeof(note), "HOST IS EMPTY");
-        scr = Scr::kError;
+        scr   = Scr::kError;
         dirty = true;
         return false;
     }
 
-    copyCString(connectHost, sizeof(connectHost), profile.host);
-    copyCString(connectUser, sizeof(connectUser), profile.user);
-    copyCString(connectPass, sizeof(connectPass), profile.pass);
-    connectPort = profile.port;
+    copyCString(connectHost, sizeof(connectHost), p->host);
+    copyCString(connectUser, sizeof(connectUser), p->user);
+    copyCString(connectPass, sizeof(connectPass), p->pass);
+    connectPort = p->port;
     sshError[0] = 0;
     sshStop     = false;
     sshPhase    = 1;
@@ -519,7 +652,7 @@ void stopSsh()
 {
     sshStop  = true;
     sshPhase = 0;
-    scr      = Scr::kProfile;
+    scr      = Scr::kList;
     dirty    = true;
 }
 
@@ -577,11 +710,15 @@ void pollWifi()
 // Input
 // ---------------------------------------------------------------------------
 enum : uint32_t {
-    kUp     = 1u << 0,
-    kDown   = 1u << 1,
-    kEnter  = 1u << 2,
-    kBack   = 1u << 3,
-    kDelete = 1u << 4,
+    kUp      = 1u << 0,
+    kDown    = 1u << 1,
+    kEnter   = 1u << 2,
+    kBack    = 1u << 3,
+    kDelete  = 1u << 4,
+    kEdit    = 1u << 6,
+    kDelProf = 1u << 7,
+    kLeft    = 1u << 8,
+    kRight   = 1u << 9,
 };
 
 uint32_t readActions()
@@ -595,6 +732,10 @@ uint32_t readActions()
             case KEY_ENTER: a |= kEnter; break;
             case '`': case '~': case 0x1B: a |= kBack; break;
             case 0x2A: a |= kDelete; break;
+            case 'e': case 'E': a |= kEdit; break;
+            case 'd': case 'D': a |= kDelProf; break;
+            case ',': a |= kLeft; break;
+            case '/': a |= kRight; break;
             default: break;
         }
     }
@@ -617,16 +758,21 @@ void resetEditEdges()
 
 void beginEdit(int field)
 {
+    Profile* p = currentProfile();
+    if (p == nullptr) return;
     editField = field;
     editLen   = 0;
     editBuf[0] = 0;
-    const char* src = field == 0 ? profile.host : field == 2 ? profile.user : profile.pass;
-    if (field == 1) {
-        snprintf(editBuf, sizeof(editBuf), "%u", static_cast<unsigned>(profile.port));
+    if (field == 2) {
+        snprintf(editBuf, sizeof(editBuf), "%u", static_cast<unsigned>(p->port));
     } else {
+        const char* src = field == 0 ? p->name : field == 1 ? p->host : field == 3 ? p->user : p->pass;
         copyCString(editBuf, sizeof(editBuf), src);
     }
     editLen = strlen(editBuf);
+    editPos = editLen;
+    editCursorOn  = true;
+    editCursorMs  = millis();
     resetEditEdges();
     // The ENTER that opened this page is still held on the next loop; require
     // a release before it can be interpreted as "save".
@@ -637,27 +783,34 @@ void beginEdit(int field)
 
 void finishEdit()
 {
-    if (editField == 1) {
+    Profile* p = currentProfile();
+    if (p == nullptr) {
+        scr = Scr::kList;
+        return;
+    }
+    if (editField == 2) {
         const long v = atol(editBuf);
         if (v < 1 || v > 65535) {
             copyCString(note, sizeof(note), "PORT 1-65535");
             dirty = true;
             return;
         }
-        profile.port = static_cast<uint16_t>(v);
+        p->port = static_cast<uint16_t>(v);
     } else if (editField == 0) {
-        copyCString(profile.host, sizeof(profile.host), editBuf);
-    } else if (editField == 2) {
-        copyCString(profile.user, sizeof(profile.user), editBuf);
+        copyCString(p->name, sizeof(p->name), editBuf);
+    } else if (editField == 1) {
+        copyCString(p->host, sizeof(p->host), editBuf);
+    } else if (editField == 3) {
+        copyCString(p->user, sizeof(p->user), editBuf);
     } else {
-        copyCString(profile.pass, sizeof(profile.pass), editBuf);
+        copyCString(p->pass, sizeof(p->pass), editBuf);
     }
-    saveProfile();
+    saveProfiles();
     scr   = Scr::kProfile;
     dirty = true;
 }
 
-void handleEdit()
+void handleEdit(uint32_t pressed)
 {
     const auto& ks = M5Cardputer.Keyboard.keysState();
     if (ks.fn && ks.del) {
@@ -669,7 +822,8 @@ void handleEdit()
     bool changed = false;
     for (char c : ks.word) {
         if (c < 32 || c >= 127) continue;
-        if (editField == 1 && (c < '0' || c > '9')) continue;
+        if (c == ',' || c == '/') continue;  // cursor movement, not text
+        if (editField == 2 && (c < '0' || c > '9')) continue;
         bool already = false;
         for (char p : prevWord) {
             if (p == c) {
@@ -678,18 +832,38 @@ void handleEdit()
             }
         }
         if (!already && editLen < (int)sizeof(editBuf) - 1) {
-            editBuf[editLen++] = c;
-            editBuf[editLen]   = 0;
-            changed            = true;
+            memmove(&editBuf[editPos + 1], &editBuf[editPos],
+                    static_cast<size_t>(editLen - editPos + 1));
+            editBuf[editPos++] = c;
+            ++editLen;
+            changed = true;
         }
     }
     prevWord.assign(ks.word.begin(), ks.word.end());
 
-    if (ks.del && !prevDel && editLen > 0) {
-        editBuf[--editLen] = 0;
-        changed            = true;
+    if (ks.del && !prevDel && editPos > 0) {
+        memmove(&editBuf[editPos - 1], &editBuf[editPos],
+                static_cast<size_t>(editLen - editPos + 1));
+        --editPos;
+        --editLen;
+        changed = true;
     }
     prevDel = ks.del;
+
+    if (pressed & kLeft && editPos > 0) {
+        --editPos;
+        changed = true;
+    }
+    if (pressed & kRight && editPos < editLen) {
+        ++editPos;
+        changed = true;
+    }
+
+    if (changed) {
+        editCursorOn = true;
+        editCursorMs = millis();
+        dirty        = true;
+    }
 
     if (ks.enter && !prevEnter) {
         prevEnter = true;
@@ -697,26 +871,86 @@ void handleEdit()
         return;
     }
     prevEnter = ks.enter;
-
-    if (changed) dirty = true;
 }
 
-void handleProfile(uint32_t pressed)
+void handleList(uint32_t pressed)
 {
+    const int total = profileCount + (profileCount < kMaxProfiles ? 1 : 0);
     if (pressed & kBack) {
         launcher::rebootInto(launcher::kAppMenu);
         return;
     }
     if (pressed & kUp) {
-        sel   = (sel + 4) % 5;
+        listSel = (listSel + total - 1) % total;
+        dirty   = true;
+    }
+    if (pressed & kDown) {
+        listSel = (listSel + 1) % total;
+        dirty   = true;
+    }
+    if (pressed & kEdit) {
+        if (listSel < profileCount) {
+            current = listSel;
+            sel     = 0;
+            scr     = Scr::kProfile;
+            note[0] = 0;
+            dirty   = true;
+        }
+        return;
+    }
+    if (pressed & kDelProf) {
+        if (listSel >= profileCount) return;
+        if (!deleteArmed) {
+            deleteArmed = true;
+            deleteAt    = millis();
+            copyCString(note, sizeof(note), "PRESS D AGAIN TO DELETE");
+            dirty = true;
+            return;
+        }
+        deleteProfile(listSel);
+        listSel = profileCount > 0 ? (listSel < profileCount ? listSel : profileCount - 1) : 0;
+        deleteArmed = false;
+        note[0]     = 0;
+        dirty       = true;
+        return;
+    }
+    if (!(pressed & kEnter)) return;
+
+    if (listSel >= profileCount) {
+        if (addProfile()) {
+            listSel = current;
+            sel     = 0;
+            scr     = Scr::kProfile;
+        } else {
+            copyCString(note, sizeof(note), "MAX 4 PROFILES");
+        }
+        dirty = true;
+        return;
+    }
+    current = listSel;
+    sel     = 0;
+    scr     = Scr::kProfile;
+    note[0] = 0;
+    dirty   = true;
+}
+
+void handleProfile(uint32_t pressed)
+{
+    if (pressed & kBack) {
+        scr   = Scr::kList;
+        dirty = true;
+        return;
+    }
+    if (pressed & kUp) {
+        sel   = (sel + 5) % 6;
         dirty = true;
     }
     if (pressed & kDown) {
-        sel   = (sel + 1) % 5;
+        sel   = (sel + 1) % 6;
         dirty = true;
     }
     if (!(pressed & kEnter)) return;
-    if (sel == 4) {
+    if (sel == 5) {
         startWifiForSsh();
     } else {
         beginEdit(sel);
@@ -804,7 +1038,7 @@ void handleError(uint32_t pressed)
         return;
     }
     if (pressed & kEnter) {
-        scr   = Scr::kProfile;
+        scr   = Scr::kList;
         dirty = true;
     }
 }
@@ -828,7 +1062,9 @@ void setup()
     lcd.fillScreen(kBg);
 
     libssh_begin();
-    loadProfile();
+    loadProfiles();
+    listSel = 0;
+    sel     = 0;
 
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
@@ -845,7 +1081,7 @@ void setup()
         }
     }
 
-    scr   = Scr::kProfile;
+    scr   = Scr::kList;
     dirty = true;
 }
 
@@ -853,6 +1089,12 @@ void loop()
 {
     M5Cardputer.update();
     pollWifi();
+
+    if (deleteArmed && millis() - deleteAt > 2000) {
+        deleteArmed = false;
+        note[0]     = 0;
+        dirty       = true;
+    }
 
     // The task flips phases asynchronously; the UI only reacts to transitions.
     if (sshPhase == 3 && scr != Scr::kTerminal) {
@@ -870,7 +1112,7 @@ void loop()
         sshPhase = 0;
         if (scr == Scr::kTerminal || scr == Scr::kConnecting) {
             copyCString(note, sizeof(note), "SESSION CLOSED");
-            scr   = Scr::kProfile;
+            scr   = Scr::kList;
             dirty = true;
         }
     }
@@ -880,11 +1122,19 @@ void loop()
     prevActions            = a;
 
     switch (scr) {
+        case Scr::kList:
+            handleList(pressed);
+            break;
         case Scr::kProfile:
             handleProfile(pressed);
             break;
         case Scr::kEdit:
-            handleEdit();
+            handleEdit(pressed);
+            if (millis() - editCursorMs >= 500) {
+                editCursorMs = millis();
+                editCursorOn = !editCursorOn;
+                drawEditLine();
+            }
             break;
         case Scr::kWifiWait:
             if (pressed & kBack) {

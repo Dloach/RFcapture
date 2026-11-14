@@ -39,8 +39,9 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - `TEST CONNECTION` 用 `example.com:80` 验证 DNS/外网 TCP。
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
-  - HOST / PORT / USER / PASSWORD profile，密码默认保存到 NVS；
+  - 最多 4 个 profile（NAME / HOST / PORT / USER / PASSWORD），`+ NEW PROFILE` 新建；
   - 密码认证、首次连接自动记录 host key；
+  - 编辑页 `, /` 移光标、光标处插入、闪烁 `_`；
   - 40×13 终端，`Fn+BKSP` 退出会话，`Fn+Q` 关闭会话。
 
 > 实测：315 MHz EV1527 遥控器（T≈500 µs）采集 → 保存 → 回放，铁门正常动作；

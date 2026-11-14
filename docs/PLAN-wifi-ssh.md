@@ -838,15 +838,16 @@ if (ssh_channel_is_eof(ch)) { /* closed */ }
 | Phase 1 WiFi 扫描/连接/保存/自动连接 | ✅ | `settings_app` + `wifi_store` |
 | Phase 2 WiFi 边界 | 🟡 | 外网 TCP 测试已加；WPA3/企业级/隐藏 SSID 尚未逐项实测 |
 | Phase 3 SSH spike | ✅ | LibSSH-ESP32 5.10.0 在 core 2.0.17 编译、登录成功 |
-| Phase 4 SSH MVP | ✅ | 单 profile 密码认证、host key TOFU、40×13 终端 |
-| Phase 5 SSH 完善 | ⬜ | 多 profile、Ed25519、host key 交互确认、ANSI 补全 |
+| Phase 4 SSH MVP | ✅ | 密码认证、host key TOFU、40×13 终端 |
+| Phase 5 SSH 完善 | 🟡 | 多 profile（最多 4）与光标编辑已完成；Ed25519、host key 交互确认、ANSI 补全待做 |
 
 与本文原计划的偏差（以代码为准）：
 
-- 第一版 SSH profile 存在 **NVS `ssh`**，不是 SPIFFS `profiles.txt`；单 profile。
+- 第一版 SSH profile 存在 **NVS `ssh`**，不是 SPIFFS `profiles.txt`；
+  当前最多 4 个（`nameN/hostN/portN/userN/passN`），旧的单 profile 键会自动迁移到 profile 0。
+- SSH 密码默认保存到 NVS `ssh/passN`（每个 profile 一份）；明文存储。
 - host key 首次连接**自动接受并写入** known_hosts，没有做“是否信任”交互；
   变更时仍会报 `HOST KEY CHANGED`。
-- SSH 密码默认保存到 NVS `ssh/pass`（单 profile），不是 `passN` 列表。
 - 终端只实现 `ssh_terminal.cpp` 的基本 VT100 子集；没有备用屏/颜色/滚动历史。
 - WiFi 从 SETTINGS 返回 launcher 走**软返回**，保留 WiFi 栈；这是为了让
   launcher header 图标反映真实连接状态。
