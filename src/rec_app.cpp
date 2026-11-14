@@ -25,7 +25,7 @@ constexpr uint16_t kHead   = 0x18E3;
 constexpr uint16_t kBar    = 0x2104;
 
 constexpr uint32_t kRate = 16000;
-constexpr size_t kBlock = 1600;  // 100 ms
+constexpr size_t kBlock = 480;  // 30 ms, callback double-buffered
 constexpr int kMaxFiles = 24;
 constexpr int kVisibleFiles = 5;
 
@@ -38,9 +38,14 @@ uint32_t prevActions = 0;
 uint32_t samples = 0;
 uint32_t savedBytes = 0;
 int peak = 0;
+int levelPct = 0;
 char status[48] = "ENT record";
 char lastFile[64] = {0};
 File wav;
+int16_t micBuf[2][kBlock];
+volatile bool micReady[2] = {false, false};
+bool deleteArmed = false;
+uint32_t deleteAt = 0;
 
 char fileNames[kMaxFiles][40];
 uint32_t fileSizes[kMaxFiles];
@@ -99,6 +104,32 @@ const char* baseName(const char* path)
     return slash ? slash + 1 : (path ? path : "");
 }
 
+void micRelease(void*, void* data, size_t)
+{
+    if (data == micBuf[0]) micReady[0] = true;
+    if (data == micBuf[1]) micReady[1] = true;
+}
+
+void processBlock(int16_t* buf)
+{
+    // Remove the ES8311 DC offset and map the block peak to a 0..100 meter.
+    int32_t sum = 0;
+    for (size_t i = 0; i < kBlock; ++i) sum += buf[i];
+    const int32_t mean = sum / static_cast<int32_t>(kBlock);
+    int p = 0;
+    for (size_t i = 0; i < kBlock; ++i) {
+        int32_t v = buf[i] - mean;
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        buf[i] = static_cast<int16_t>(v);
+        const int a = abs(static_cast<int>(v));
+        if (a > p) p = a;
+    }
+    peak = p;
+    levelPct = p * 100 / 16000;
+    if (levelPct > 100) levelPct = 100;
+}
+
 void scanFiles()
 {
     fileCount = 0;
@@ -148,9 +179,12 @@ void drawTop()
 
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("LEVEL", 4, 41);
-    lcd.drawRect(50, 40, 186, 10, kDim);
-    const int w = peak * 182 / 32767;
-    lcd.fillRect(52, 42, w, 6, peak > 20000 ? kWarn : kOk);
+    lcd.drawRect(50, 40, 150, 10, kDim);
+    lcd.fillRect(52, 42, (levelPct * 146) / 100, 6, levelPct > 85 ? kWarn : kOk);
+    char lv[8];
+    snprintf(lv, sizeof(lv), "%d%%", levelPct);
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawRightString(lv, lcd.width() - 4, 41);
 
     const char* shown = lastFile[0] ? baseName(lastFile) : "-";
     snprintf(line, sizeof(line), "FILE %.28s", shown);
@@ -192,8 +226,8 @@ void draw()
     header();
     drawTop();
     drawList();
-    static const Hint h[] = {{"ENT", "rec/stop"}, {"P", "play"}, {"esc", "back"}};
-    hints(h, 3);
+    static const Hint h[] = {{"ENT", "rec/stop"}, {"P", "play"}, {"D", "del"}, {"esc", "back"}};
+    hints(h, 4);
     dirty = false;
 }
 
@@ -299,47 +333,45 @@ void startRecording()
 
 void recordLoop()
 {
-    static int16_t buf[2][kBlock];
-    int bufIndex = 0;
     bool enterReleased = false;
+    int writeIndex = 0;
     int drawCounter = 0;
+    micReady[0] = micReady[1] = false;
+    M5.Mic.setBufferReleaseCallback(nullptr, micRelease);
+    M5.Mic.record(micBuf[0], kBlock, kRate, false);
+    M5.Mic.record(micBuf[1], kBlock, kRate, false);
+
     while (recording) {
         M5Cardputer.update();
         if (M5Cardputer.Keyboard.isKeyPressed('`')) break;
-
         const bool enterNow = M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER);
         if (!enterNow) enterReleased = true;
         if (enterReleased && enterNow) break;
 
-        bool armed = false;
-        for (int retry = 0; retry < 8 && !armed; ++retry) {
-            armed = M5.Mic.record(buf[bufIndex], kBlock, kRate, false);
-            if (!armed) {
-                M5Cardputer.update();
-                delay(5);
-            }
+        if (!micReady[writeIndex]) {
+            delay(1);
+            continue;
         }
-        if (!armed) {
-            snprintf(status, sizeof(status), "MIC BUSY");
-            break;
-        }
-        const uint32_t blockMs = static_cast<uint32_t>(kBlock) * 1000u / kRate;
-        delay(blockMs + 2);
+
+        int16_t* block = micBuf[writeIndex];
+        processBlock(block);
         if (samples == 0) writeHeader(0);
-        const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf[bufIndex]), kBlock * 2);
+        const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(block), kBlock * 2);
         if (wrote != kBlock * 2) {
             snprintf(status, sizeof(status), "SD WRITE FAILED");
             break;
         }
-        int p = 0;
-        for (size_t i = 0; i < kBlock; ++i) {
-            const int v = abs(buf[bufIndex][i]);
-            if (v > p) p = v;
+        micReady[writeIndex] = false;
+        if (!M5.Mic.record(block, kBlock, kRate, false)) {
+            // The slot was just released; retry shortly rather than dropping it.
+            for (int retry = 0; retry < 8; ++retry) {
+                delay(2);
+                if (M5.Mic.record(block, kBlock, kRate, false)) break;
+            }
         }
-        peak = p;
-        bufIndex ^= 1;
+        writeIndex ^= 1;
         samples += kBlock;
-        if (++drawCounter >= 4) {
+        if (++drawCounter >= 3) {
             drawCounter = 0;
             drawLive();
         }
@@ -377,8 +409,8 @@ void playSelected()
     f.seek(44);
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.setVolume(255);
-    static int16_t block[kBlock];
+    M5.Speaker.setVolume(240);
+    static int16_t block[4096];  // 256 ms chunks: few SD-read gaps
     size_t remaining = bytes - 44;
     snprintf(status, sizeof(status), "PLAYING");
     dirty = true;
@@ -408,7 +440,7 @@ void playSelected()
     dirty = true;
 }
 
-enum : uint32_t { kBack = 1, kEnter = 2, kPlay = 4, kUp = 8, kDown = 16 };
+enum : uint32_t { kBack = 1, kEnter = 2, kPlay = 4, kUp = 8, kDown = 16, kDelete = 32 };
 
 uint32_t readActions()
 {
@@ -420,6 +452,7 @@ uint32_t readActions()
         if (c == 'p' || c == 'P') a |= kPlay;
         if (c == ';') a |= kUp;
         if (c == '.') a |= kDown;
+        if (c == 'd' || c == 'D') a |= kDelete;
     }
     return a;
 }
@@ -474,6 +507,27 @@ void loop()
         if (fileSel + 1 < fileCount) ++fileSel;
         if (fileSel >= fileTop + kVisibleFiles) fileTop = fileSel - kVisibleFiles + 1;
         dirty = true;
+    }
+    if (deleteArmed && millis() - deleteAt > 2000) {
+        deleteArmed = false;
+        if (strcmp(status, "PRESS D AGAIN") == 0) snprintf(status, sizeof(status), "READY");
+        dirty = true;
+    }
+    if ((pressed & kDelete) && fileCount > 0) {
+        if (!deleteArmed) {
+            deleteArmed = true;
+            deleteAt = millis();
+            snprintf(status, sizeof(status), "PRESS D AGAIN");
+            dirty = true;
+        } else {
+            char path[64];
+            snprintf(path, sizeof(path), "/recordings/%s", fileNames[fileSel]);
+            const bool ok = SD.remove(path);
+            deleteArmed = false;
+            scanFiles();
+            snprintf(status, sizeof(status), ok ? "DELETED" : "DELETE FAILED");
+            dirty = true;
+        }
     }
     if (pressed & kEnter) {
         startRecording();
