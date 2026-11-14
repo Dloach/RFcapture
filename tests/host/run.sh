@@ -20,6 +20,8 @@ cd "$root"
 
 out="tests/host/test_decoder"
 sources=("tests/host/test_decoder.cpp" "src/ook_decoder.cpp")
+term_out="tests/host/test_ssh_terminal"
+term_sources=("tests/host/test_ssh_terminal.cpp" "src/ssh_terminal.cpp")
 
 compiler="${COMPILER:-}"
 
@@ -87,3 +89,13 @@ fi
 
 echo
 "$out"
+
+term_args=(-std=c++17 -O2 -Wall -I tests/host/stubs -I src -o "$term_out" "${term_sources[@]}")
+echo "Building terminal tests with: $compiler"
+if [[ "$is_zig" == true ]]; then
+    "$compiler" c++ "${term_args[@]}"
+else
+    "$compiler" "${term_args[@]}"
+fi
+echo
+"$term_out"

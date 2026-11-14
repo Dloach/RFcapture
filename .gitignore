@@ -7,6 +7,7 @@
 node_modules/
 tests/host/*.exe
 tests/host/test_decoder
+tests/host/test_ssh_terminal
 *.pdb
 *.obj
 *.ilk

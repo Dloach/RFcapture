@@ -166,7 +166,8 @@ host 测试覆盖 EV1527 / PT2262 解码、基准时间估算、波形质量分�
 ```
 
 需要一个本机 C++17 编译器（g++ / clang++ / MSVC）。脚本也认 `tools/zig/zig.exe`
-和 PATH 上的 `zig`。当前为 **43 项全过**；PlatformIO 的 Xtensa 交叉编译器不能跑这些测试。
+和 PATH 上的 `zig`。当前为 **50 项全过**（43 解码/绑定/存储 + 7 SSH 终端）；
+PlatformIO 的 Xtensa 交叉编译器不能跑这些测试。
 
 ## 合规
 

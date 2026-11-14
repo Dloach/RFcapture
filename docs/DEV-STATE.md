@@ -19,7 +19,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | 快捷绑定 | `quick.txt` 6 字段（slot/kind/index/icon/color/key）；按 UID/code 的稳定 key 解析，失效显式 `BINDING STALE` |
 | 永久列表撕裂 | P0-2 已改为 blob→count 提交 + 按字节数自愈；`recoverSavedCount()` 有 host 测试 |
 | 同码重采 | P0-3：新波形分数显著更高时自动替换，`BETTER WAVE`；再次 ENTER 可更新永久列表 |
-| host 测试 | **43 项全过**（g++ 15.2 / WSL 验证） |
+| host 测试 | **50 项全过**（43 解码/绑定/存储 + 7 SSH 终端；g++ 15.2 / WSL 验证） |
 
 ### 0.1 KEYBOARD 速查
 

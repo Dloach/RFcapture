@@ -19,6 +19,8 @@ Push-Location $root
 
 $out = Join-Path $root "tests\host\test_decoder.exe"
 $sources = @("tests\host\test_decoder.cpp", "src\ook_decoder.cpp")
+$termOut = Join-Path $root "tests\host\test_ssh_terminal.exe"
+$termSources = @("tests\host\test_ssh_terminal.cpp", "src\ssh_terminal.cpp")
 
 $exe = ""
 $isZig = $false
@@ -78,5 +80,21 @@ if ($LASTEXITCODE -ne 0) {
 
 & $out
 $code = $LASTEXITCODE
+
+$termBuildArgs = @("-std=c++17", "-I", "tests/host/stubs", "-I", "src", "-o", $termOut) + $termSources
+if ($isZig) {
+    Write-Host "Building terminal tests with zig: $exe"
+    & $exe c++ @termBuildArgs
+} else {
+    Write-Host "Building terminal tests with: $exe"
+    & $exe @termBuildArgs
+}
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    throw "terminal test build failed"
+}
+& $termOut
+if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+
 Pop-Location
 exit $code
