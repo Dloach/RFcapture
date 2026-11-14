@@ -17,16 +17,19 @@
 
 #include "app.h"
 #include "backup_app.h"
+#include "badusb_app.h"
+#include "files_app.h"
 #include "kbd_app.h"
 #include "launcher.h"
 #include "nfc_app.h"
 #include "rf_config.h"
 #include "settings_app.h"
 #include "ssh_app.h"
+#include "ui_prefs.h"
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh };
+enum class Running : uint8_t { kMenu, kRf, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb };
 
 Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
@@ -96,11 +99,24 @@ void setup()
             sshapp::setup();
             break;
 
+        case launcher::kAppFiles:
+            g_running = Running::kFiles;
+            filesapp::setup();
+            break;
+
+        case launcher::kAppBadUsb:
+            g_running = Running::kBadUsb;
+            badusbapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
             break;
     }
+
+    uiprefs::begin();
+    uiprefs::applyBrightness();
 }
 
 void loop()
@@ -127,8 +143,16 @@ void loop()
         case Running::kSsh:
             sshapp::loop();
             break;
+        case Running::kFiles:
+            filesapp::loop();
+            break;
+        case Running::kBadUsb:
+            badusbapp::loop();
+            break;
         default:
             launcher::menuLoop();
             break;
     }
+
+    uiprefs::tick();
 }

@@ -8,9 +8,12 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 五功能 **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；BACKUP 在 SETTINGS 内 |
-| RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已升为顶层功能 |
+| 功能结构 | launcher 七功能 **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / FILES / BADUSB / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；BACKUP、DISPLAY/POWER 在 SETTINGS 内 |
+| RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已移入 SETTINGS |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
+| FILES | TF/SPIFFS 浏览、文本查看、双击 D 删除文件；不递归删目录 |
+| BADUSB | TF `/badusb/*.txt` DuckyScript 子集，USB HID 输出；仅授权设备 |
+| SETTINGS / DISPLAY | 背光 10–100%、超时 OFF/15/30/60/120s、电池百分比/电压/充电；NVS `ui` |
 | SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |
 | SETTINGS / OTA | ArduinoOTA，页面停在 `SETTINGS → OTA UPDATE` 时可用 `pio run -e cardputer-ota -t upload`；密码 `cardputer-ota` |
 | SSH | LibSSH-ESP32 5.10.0（LGPL-2.1），最多 4 个 profile，密码认证、host key 指纹确认、40×13 终端；Ed25519 代码保留但默认关闭 |

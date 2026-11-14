@@ -31,6 +31,8 @@ enum App : uint8_t {
     kAppKbd    = 4,  // wired / Bluetooth keyboard
     kAppSettings = 5,  // WiFi settings and future system settings
     kAppSsh      = 6,  // SSH client over WiFi
+    kAppFiles    = 7,  // TF/SPIFFS file browser
+    kAppBadUsb   = 8,  // DuckyScript over USB HID
 };
 
 /// Which app this boot belongs to (from NVS).

@@ -11,6 +11,7 @@
 #include "polling_keyboard.h"
 #include "rf_config.h"
 #include "ui_hint.h"
+#include "ui_prefs.h"
 #include "wifi_store.h"
 
 namespace settingsapp {
@@ -38,11 +39,13 @@ enum class Scr : uint8_t {
     kSaved,
     kTest,
     kOta,
+    kPower,
 };
 Scr scr = Scr::kSettings;
 bool dirty = true;
 
 int settingsSel = 0;
+int powerSel    = 0;
 int wifiSel     = 0;
 int scanSel     = 0;
 int scanTop     = 0;
@@ -69,6 +72,8 @@ enum : uint32_t {
     kDelete = 1u << 4,
     kScan   = 1u << 5,
     kForget = 1u << 6,
+    kLeft   = 1u << 7,
+    kRight  = 1u << 8,
 };
 
 struct ScanItem {
@@ -150,10 +155,11 @@ void drawSettings()
     lcd.fillScreen(kBg);
     header("SETTINGS");
 
-    const char* items[] = {"WIFI SETTINGS", "OTA UPDATE", "BACKUP / RESTORE"};
+    const char* items[] = {"WIFI SETTINGS", "OTA UPDATE", "BACKUP / RESTORE",
+                           "DISPLAY / POWER"};
     lcd.setTextSize(2);
-    for (int i = 0; i < 3; ++i) {
-        const int y = 20 + i * 26;
+    for (int i = 0; i < 4; ++i) {
+        const int y = 14 + i * 23;
         if (i == settingsSel) lcd.fillRect(4, y - 4, lcd.width() - 8, 21, kBar);
         lcd.setTextColor(i == settingsSel ? kAccent : kText, i == settingsSel ? kBar : kBg);
         lcd.drawString(items[i], 12, y);
@@ -162,11 +168,13 @@ void drawSettings()
 
     lcd.setTextColor(kDim, kBg);
     if (settingsSel == 0) {
-        lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 100);
+        lcd.drawString("Scan, connect and save 2.4 GHz networks.", 6, 104);
     } else if (settingsSel == 1) {
-        lcd.drawString("Wireless flash; keep this page open.", 6, 100);
+        lcd.drawString("Wireless flash; keep this page open.", 6, 104);
+    } else if (settingsSel == 2) {
+        lcd.drawString("TF backup / restore RF, NFC, bindings.", 6, 104);
     } else {
-        lcd.drawString("TF backup / restore RF, NFC, bindings.", 6, 100);
+        lcd.drawString("Brightness, timeout, battery.", 6, 104);
     }
 
     static const Hint h[] = {{"ENT", "open"}, {"esc", "back"}};
@@ -466,6 +474,90 @@ void handleOta(uint32_t pressed)
     }
 }
 
+void drawPower()
+{
+    lcd.fillScreen(kBg);
+    header("DISPLAY / POWER");
+
+    static const uint16_t timeouts[] = {0, 15, 30, 60, 120};
+    const uint16_t timeout = uiprefs::timeoutSeconds();
+    char timeoutText[12];
+    if (timeout == 0) {
+        snprintf(timeoutText, sizeof(timeoutText), "OFF");
+    } else {
+        snprintf(timeoutText, sizeof(timeoutText), "%us", static_cast<unsigned>(timeout));
+    }
+    char brightText[12];
+    snprintf(brightText, sizeof(brightText), "%u%%", static_cast<unsigned>(uiprefs::brightness()));
+
+    const char* labels[] = {"BRIGHTNESS", "SCREEN TIMEOUT"};
+    const char* values[] = {brightText, timeoutText};
+    for (int i = 0; i < 2; ++i) {
+        const int y = 20 + i * 22;
+        if (i == powerSel) lcd.fillRect(4, y - 4, lcd.width() - 8, 21, kBar);
+        lcd.setTextColor(i == powerSel ? kAccent : kText, i == powerSel ? kBar : kBg);
+        lcd.drawString(labels[i], 10, y + 2);
+        lcd.drawRightString(values[i], lcd.width() - 10, y + 2);
+    }
+
+    lcd.setTextColor(kDim, kBg);
+    char battery[40];
+    snprintf(battery, sizeof(battery), "BATTERY %d%%  %dmV",
+             static_cast<int>(M5.Power.getBatteryLevel()),
+             static_cast<int>(M5.Power.getBatteryVoltage()));
+    lcd.drawString(battery, 8, 72);
+    lcd.drawString(M5.Power.isCharging() ? "CHARGING" : "ON BATTERY", 8, 86);
+    lcd.drawString("Screen blanks after timeout.", 8, 102);
+
+    static const Hint h[] = {{"; .", "select"}, {", /", "adjust"}, {"esc", "back"}};
+    hints(h, 3);
+}
+
+void enterPower()
+{
+    powerSel = 0;
+    scr      = Scr::kPower;
+    dirty    = true;
+}
+
+void handlePower(uint32_t pressed)
+{
+    static const uint16_t timeouts[] = {0, 15, 30, 60, 120};
+    if (pressed & kBack) {
+        scr   = Scr::kSettings;
+        dirty = true;
+        return;
+    }
+    if (pressed & kUp || pressed & kDown) {
+        powerSel ^= 1;
+        dirty = true;
+        return;
+    }
+    int delta = 0;
+    if (pressed & kRight) delta = 1;
+    if (pressed & kLeft) delta = -1;
+    if (pressed & kEnter) delta = 1;
+    if (delta == 0) return;
+
+    if (powerSel == 0) {
+        int b = uiprefs::brightness() + delta * 10;
+        if (b < 10) b = 10;
+        if (b > 100) b = 100;
+        uiprefs::setBrightness(static_cast<uint8_t>(b));
+    } else {
+        int idx = 0;
+        for (int i = 0; i < 5; ++i) {
+            if (timeouts[i] == uiprefs::timeoutSeconds()) {
+                idx = i;
+                break;
+            }
+        }
+        idx = (idx + delta + 5) % 5;
+        uiprefs::setTimeoutSeconds(timeouts[idx]);
+    }
+    dirty = true;
+}
+
 void drawCurrent()
 {
     switch (scr) {
@@ -477,6 +569,7 @@ void drawCurrent()
         case Scr::kSaved: drawSaved(); break;
         case Scr::kTest: drawTest(); break;
         case Scr::kOta: drawOta(); break;
+        case Scr::kPower: drawPower(); break;
     }
 }
 
@@ -709,6 +802,8 @@ uint32_t readActions()
             case 0x2A: a |= kDelete; break;
             case 's': case 'S': a |= kScan; break;
             case 'd': case 'D': a |= kForget; break;
+            case ',': a |= kLeft; break;
+            case '/': a |= kRight; break;
             default: break;
         }
     }
@@ -1024,11 +1119,11 @@ bool loop()
                 return true;
             }
             if (pressed & kUp) {
-                settingsSel = (settingsSel + 2) % 3;
+                settingsSel = (settingsSel + 3) % 4;
                 dirty       = true;
             }
             if (pressed & kDown) {
-                settingsSel = (settingsSel + 1) % 3;
+                settingsSel = (settingsSel + 1) % 4;
                 dirty       = true;
             }
             if (pressed & kEnter) {
@@ -1036,13 +1131,18 @@ bool loop()
                     enterWifi();
                 } else if (settingsSel == 1) {
                     enterOta();
-                } else {
+                } else if (settingsSel == 2) {
                     launcher::rebootInto(launcher::kAppBackup);
+                } else {
+                    enterPower();
                 }
             }
             break;
         case Scr::kOta:
             handleOta(pressed);
+            break;
+        case Scr::kPower:
+            handlePower(pressed);
             break;
         case Scr::kWifi:
             handleWifiPage(pressed);
