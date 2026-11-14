@@ -201,43 +201,50 @@ void startRecording()
 
 void recordLoop()
 {
-    static int16_t buf[kBlock];
+    static int16_t buf[2][kBlock];
+    int bufIndex = 0;
     bool sReleased = false;
     int drawCounter = 0;
     while (recording) {
+        M5Cardputer.update();
         if (M5Cardputer.Keyboard.isKeyPressed('`') ||
             M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
             break;
         }
         bool armed = false;
         for (int retry = 0; retry < 8 && !armed; ++retry) {
-            armed = M5.Mic.record(buf, kBlock, kRate, false);
-            if (!armed) delay(5);
+            armed = M5.Mic.record(buf[bufIndex], kBlock, kRate, false);
+            if (!armed) {
+                M5Cardputer.update();
+                delay(5);
+            }
         }
         if (!armed) {
             snprintf(status, sizeof(status), "MIC BUSY");
             break;
         }
-        // The official mic_wav_record example does not spin on isRecording();
-        // it records the next block while the previous one drains.  240
-        // samples are 15 ms; 20 ms is enough for one double-buffered block.
+        // 240 samples are 15 ms; give the DMA one block before reusing the
+        // other buffer.  Alternate buffers so a slow drain cannot overwrite
+        // the block we are about to write.
         delay(20);
         if (samples == 0) writeHeader(0);
-        const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf), kBlock * 2);
+        const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf[bufIndex]), kBlock * 2);
         if (wrote != kBlock * 2) {
             snprintf(status, sizeof(status), "SD WRITE FAILED");
             break;
         }
-        samples += kBlock;
         int p = 0;
         for (size_t i = 0; i < kBlock; ++i) {
-            const int v = abs(buf[i]);
+            const int v = abs(buf[bufIndex][i]);
             if (v > p) p = v;
         }
         peak = p;
+        bufIndex ^= 1;
+        samples += kBlock;
         if (++drawCounter >= 8) {
             drawCounter = 0;
             dirty = true;
+            draw();
         }
         const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
                           M5Cardputer.Keyboard.isKeyPressed('S');
