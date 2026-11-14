@@ -3,6 +3,7 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 
+#include <cstring>
 #include <memory>
 
 #include "launcher.h"
@@ -21,9 +22,12 @@ constexpr uint16_t kAccent = 0xFD20;
 constexpr uint16_t kOk     = 0x07E0;
 constexpr uint16_t kWarn   = 0xF800;
 constexpr uint16_t kHead   = 0x18E3;
+constexpr uint16_t kBar    = 0x2104;
 
 constexpr uint32_t kRate = 16000;
-constexpr size_t kBlock = 1600;  // 100 ms, less inter-block gap
+constexpr size_t kBlock = 1600;  // 100 ms
+constexpr int kMaxFiles = 24;
+constexpr int kVisibleFiles = 5;
 
 auto& lcd = M5Cardputer.Display;
 bool sdOk = false;
@@ -34,9 +38,15 @@ uint32_t prevActions = 0;
 uint32_t samples = 0;
 uint32_t savedBytes = 0;
 int peak = 0;
-char status[64] = "S start";
+char status[48] = "ENT record";
 char lastFile[64] = {0};
 File wav;
+
+char fileNames[kMaxFiles][40];
+uint32_t fileSizes[kMaxFiles];
+int fileCount = 0;
+int fileSel = 0;
+int fileTop = 0;
 
 struct __attribute__((packed)) WavHeader {
     char riff[4];
@@ -83,47 +93,113 @@ void header()
     lcd.drawRightString(b, lcd.width() - 3, 2);
 }
 
-void draw()
+const char* baseName(const char* path)
 {
-    lcd.fillScreen(kBg);
-    header();
-    lcd.setTextColor(recording ? kWarn : kText, kBg);
-    lcd.drawString(status, 4, 24);
+    const char* slash = path ? strrchr(path, '/') : nullptr;
+    return slash ? slash + 1 : (path ? path : "");
+}
+
+void scanFiles()
+{
+    fileCount = 0;
+    File dir = SD.open("/recordings");
+    if (dir) {
+        while (fileCount < kMaxFiles) {
+            File f = dir.openNextFile();
+            if (!f) break;
+            const char* raw = f.name();
+            const char* name = baseName(raw);
+            String lower = name;
+            lower.toLowerCase();
+            if (!f.isDirectory() && lower.endsWith(".wav")) {
+                strncpy(fileNames[fileCount], name, sizeof(fileNames[0]) - 1);
+                fileNames[fileCount][sizeof(fileNames[0]) - 1] = 0;
+                fileSizes[fileCount] = f.size();
+                ++fileCount;
+            }
+            f.close();
+        }
+        dir.close();
+    }
+    if (fileCount == 0) {
+        fileSel = 0;
+        fileTop = 0;
+    } else {
+        if (fileSel >= fileCount) fileSel = fileCount - 1;
+        if (fileSel < 0) fileSel = 0;
+        if (fileSel < fileTop) fileTop = fileSel;
+        if (fileSel >= fileTop + kVisibleFiles) fileTop = fileSel - kVisibleFiles + 1;
+    }
+}
+
+void drawTop()
+{
+    lcd.fillRect(0, 13, lcd.width(), 55, kBg);
     lcd.setTextColor(micOk ? kOk : kWarn, kBg);
-    lcd.drawString(micOk ? "MIC OK" : "MIC FAIL", 4, 36);
+    lcd.drawString(micOk ? "MIC OK" : "MIC FAIL", 4, 16);
+    lcd.setTextColor(recording ? kWarn : kDim, kBg);
+    lcd.drawRightString(status, lcd.width() - 4, 16);
+
     char line[64];
     snprintf(line, sizeof(line), "TIME %lu.%01lus", static_cast<unsigned long>(samples / kRate),
              static_cast<unsigned long>((samples % kRate) / (kRate / 10)));
     lcd.setTextColor(kText, kBg);
-    lcd.drawString(line, 4, 48);
-    snprintf(line, sizeof(line), "FILE %s", lastFile[0] ? lastFile : "-");
+    lcd.drawString(line, 4, 28);
+
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString(line, 4, 60);
+    lcd.drawString("LEVEL", 4, 41);
+    lcd.drawRect(50, 40, 186, 10, kDim);
+    const int w = peak * 182 / 32767;
+    lcd.fillRect(52, 42, w, 6, peak > 20000 ? kWarn : kOk);
+
+    const char* shown = lastFile[0] ? baseName(lastFile) : "-";
+    snprintf(line, sizeof(line), "FILE %.28s", shown);
+    lcd.setTextColor(kDim, kBg);
+    lcd.drawString(line, 4, 53);
     snprintf(line, sizeof(line), "DATA %lu B", static_cast<unsigned long>(savedBytes));
-    lcd.drawString(line, 4, 72);
+    lcd.drawRightString(line, lcd.width() - 4, 53);
+}
+
+void drawList()
+{
+    lcd.fillRect(0, 68, lcd.width(), 48, kBg);
+    lcd.drawFastHLine(0, 68, lcd.width(), kDim);
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString("LEVEL", 4, 88);
-    lcd.drawRect(52, 88, 180, 10, kDim);
-    const int w = peak * 176 / 32767;
-    lcd.fillRect(54, 90, w, 6, peak > 20000 ? kWarn : kOk);
-    lcd.setTextColor(kDim, kBg);
-    lcd.drawString("WAV 16 kHz mono", 4, 102);
-    static const Hint h[] = {{"S", "record"}, {"P", "play"}, {"esc", "back"}};
+    lcd.drawString("SAVED", 4, 70);
+    if (fileCount == 0) {
+        lcd.drawString("no recordings", 4, 82);
+        return;
+    }
+    for (int r = 0; r < kVisibleFiles; ++r) {
+        const int idx = fileTop + r;
+        if (idx >= fileCount) break;
+        const int y = 78 + r * 8;
+        if (idx == fileSel && !recording) lcd.fillRect(0, y - 1, lcd.width(), 9, kBar);
+        lcd.setTextColor(idx == fileSel && !recording ? kAccent : kText,
+                         idx == fileSel && !recording ? kBar : kBg);
+        lcd.drawString(fileNames[idx], 4, y);
+        char sz[20];
+        snprintf(sz, sizeof(sz), "%luB", static_cast<unsigned long>(fileSizes[idx]));
+        lcd.setTextColor(idx == fileSel && !recording ? kAccent : kDim,
+                         idx == fileSel && !recording ? kBar : kBg);
+        lcd.drawRightString(sz, lcd.width() - 4, y);
+    }
+}
+
+void draw()
+{
+    lcd.fillScreen(kBg);
+    header();
+    drawTop();
+    drawList();
+    static const Hint h[] = {{"ENT", "rec/stop"}, {"P", "play"}, {"esc", "back"}};
     hints(h, 3);
     dirty = false;
 }
 
 void drawLive()
 {
-    char line[64];
-    lcd.fillRect(4, 48, 150, 9, kBg);
-    lcd.setTextColor(kText, kBg);
-    snprintf(line, sizeof(line), "TIME %lu.%01lus", static_cast<unsigned long>(samples / kRate),
-             static_cast<unsigned long>((samples % kRate) / (kRate / 10)));
-    lcd.drawString(line, 4, 48);
-    lcd.fillRect(54, 90, 176, 6, kBg);
-    const int w = peak * 176 / 32767;
-    lcd.fillRect(54, 90, w, 6, peak > 20000 ? kWarn : kOk);
+    drawTop();
 }
 
 void writeHeader(uint32_t dataBytes)
@@ -158,6 +234,7 @@ bool openRecording()
         WavHeader zero{};
         wav.write(reinterpret_cast<const uint8_t*>(&zero), sizeof(zero));
         strncpy(lastFile, path, sizeof(lastFile) - 1);
+        lastFile[sizeof(lastFile) - 1] = 0;
         samples = 0;
         peak = 0;
         return true;
@@ -168,16 +245,16 @@ bool openRecording()
 void beginMic()
 {
     M5.Mic.end();
-    M5.Speaker.end();   // official Cardputer mic_wav_record sequence
+    M5.Speaker.end();
     delay(100);
     auto mc = M5.Mic.config();
     mc.sample_rate = kRate;
-    mc.magnification = 64;  // software mic gain (default 16)
+    mc.magnification = 64;
     M5.Mic.config(mc);
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
-        delay(1200);  // ES8311 ADC warm-up
+        delay(1200);
     }
     Serial.printf("[rec] mic=%d gain=%d\n", micOk ? 1 : 0, mc.magnification);
 }
@@ -189,6 +266,10 @@ void stopRecording()
     writeHeader(samples * 2);
     wav.close();
     savedBytes = samples * 2;
+    scanFiles();
+    fileSel = fileCount > 0 ? fileCount - 1 : 0;
+    if (fileSel < fileTop) fileTop = fileSel;
+    if (fileSel >= fileTop + kVisibleFiles) fileTop = fileSel - kVisibleFiles + 1;
     snprintf(status, sizeof(status), "SAVED %lu B", static_cast<unsigned long>(savedBytes));
     dirty = true;
 }
@@ -220,14 +301,16 @@ void recordLoop()
 {
     static int16_t buf[2][kBlock];
     int bufIndex = 0;
-    bool sReleased = false;
+    bool enterReleased = false;
     int drawCounter = 0;
     while (recording) {
         M5Cardputer.update();
-        if (M5Cardputer.Keyboard.isKeyPressed('`') ||
-            M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-            break;
-        }
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) break;
+
+        const bool enterNow = M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER);
+        if (!enterNow) enterReleased = true;
+        if (enterReleased && enterNow) break;
+
         bool armed = false;
         for (int retry = 0; retry < 8 && !armed; ++retry) {
             armed = M5.Mic.record(buf[bufIndex], kBlock, kRate, false);
@@ -240,8 +323,6 @@ void recordLoop()
             snprintf(status, sizeof(status), "MIC BUSY");
             break;
         }
-        // 100 ms of audio; leave only 2 ms for the next DMA block.  This
-        // keeps the WAV continuous instead of dropping 5 ms every block.
         const uint32_t blockMs = static_cast<uint32_t>(kBlock) * 1000u / kRate;
         delay(blockMs + 2);
         if (samples == 0) writeHeader(0);
@@ -258,15 +339,11 @@ void recordLoop()
         peak = p;
         bufIndex ^= 1;
         samples += kBlock;
-        if (++drawCounter >= 8) {
+        if (++drawCounter >= 4) {
             drawCounter = 0;
             drawLive();
         }
-        const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
-                          M5Cardputer.Keyboard.isKeyPressed('S');
-        if (!sNow) sReleased = true;
-        if (sReleased && sNow) break;
-        if (samples > kRate * 300) {  // 5 minute safety cap
+        if (samples > kRate * 300) {
             snprintf(status, sizeof(status), "MAX 5 MIN");
             break;
         }
@@ -275,14 +352,16 @@ void recordLoop()
     draw();
 }
 
-void playLast()
+void playSelected()
 {
-    if (!lastFile[0]) {
+    if (fileCount == 0) {
         snprintf(status, sizeof(status), "NO RECORDING");
         dirty = true;
         return;
     }
-    File f = SD.open(lastFile, FILE_READ);
+    char path[64];
+    snprintf(path, sizeof(path), "/recordings/%s", fileNames[fileSel]);
+    File f = SD.open(path, FILE_READ);
     if (!f) {
         snprintf(status, sizeof(status), "OPEN FAILED");
         dirty = true;
@@ -305,11 +384,10 @@ void playLast()
     dirty = true;
     draw();
     while (remaining > 0) {
-        size_t want = remaining > sizeof(block) ? sizeof(block) : remaining;
+        const size_t want = remaining > sizeof(block) ? sizeof(block) : remaining;
         const size_t got = f.read(reinterpret_cast<uint8_t*>(block), want);
         if (got < 2) break;
-        const size_t samplesRead = got / 2;
-        M5.Speaker.playRaw(block, samplesRead, kRate, false);
+        M5.Speaker.playRaw(block, got / 2, kRate, false);
         while (M5.Speaker.isPlaying()) {
             M5Cardputer.update();
             if (M5Cardputer.Keyboard.isKeyPressed('`') ||
@@ -330,7 +408,7 @@ void playLast()
     dirty = true;
 }
 
-enum : uint32_t { kBack = 1, kStart = 2, kPlay = 4 };
+enum : uint32_t { kBack = 1, kEnter = 2, kPlay = 4, kUp = 8, kDown = 16 };
 
 uint32_t readActions()
 {
@@ -338,8 +416,10 @@ uint32_t readActions()
     for (const auto& pos : M5Cardputer.Keyboard.keyList()) {
         const uint8_t c = static_cast<uint8_t>(M5Cardputer.Keyboard.getKeyValue(pos).value_first);
         if (c == '`' || c == '~' || c == 0x1B) a |= kBack;
-        if (c == 's' || c == 'S') a |= kStart;
+        if (c == KEY_ENTER) a |= kEnter;
         if (c == 'p' || c == 'P') a |= kPlay;
+        if (c == ';') a |= kUp;
+        if (c == '.') a |= kDown;
     }
     return a;
 }
@@ -360,8 +440,12 @@ void setup()
     lcd.fillScreen(kBg);
 
     sdOk = sdmount::ensure(false);
-    if (!sdOk) snprintf(status, sizeof(status), "NO TF CARD");
-    else beginMic();
+    if (!sdOk) {
+        snprintf(status, sizeof(status), "NO TF CARD");
+    } else {
+        scanFiles();
+        beginMic();
+    }
     draw();
 }
 
@@ -374,7 +458,6 @@ void loop()
 
     if (recording) {
         recordLoop();
-        draw();
         return;
     }
     if (pressed & kBack) {
@@ -382,14 +465,21 @@ void loop()
         launcher::rebootInto(launcher::kAppMenu);
         return;
     }
-    if (pressed & kStart) {
-        if (recording) stopRecording();
-        else startRecording();
-        draw();
+    if (pressed & kUp && fileCount > 0) {
+        if (fileSel > 0) --fileSel;
+        if (fileSel < fileTop) fileTop = fileSel;
+        dirty = true;
+    }
+    if (pressed & kDown && fileCount > 0) {
+        if (fileSel + 1 < fileCount) ++fileSel;
+        if (fileSel >= fileTop + kVisibleFiles) fileTop = fileSel - kVisibleFiles + 1;
+        dirty = true;
+    }
+    if (pressed & kEnter) {
+        startRecording();
     }
     if (pressed & kPlay) {
-        playLast();
-        draw();
+        playSelected();
     }
     if (dirty) draw();
 }
