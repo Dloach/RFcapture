@@ -23,7 +23,7 @@ constexpr uint16_t kWarn   = 0xF800;
 constexpr uint16_t kHead   = 0x18E3;
 
 constexpr uint32_t kRate = 16000;
-constexpr size_t kBlock = 240;  // 15 ms, matches M5's mic_wav_record example
+constexpr size_t kBlock = 1600;  // 100 ms, less inter-block gap
 
 auto& lcd = M5Cardputer.Display;
 bool sdOk = false;
@@ -113,6 +113,19 @@ void draw()
     dirty = false;
 }
 
+void drawLive()
+{
+    char line[64];
+    lcd.fillRect(4, 48, 150, 9, kBg);
+    lcd.setTextColor(kText, kBg);
+    snprintf(line, sizeof(line), "TIME %lu.%01lus", static_cast<unsigned long>(samples / kRate),
+             static_cast<unsigned long>((samples % kRate) / (kRate / 10)));
+    lcd.drawString(line, 4, 48);
+    lcd.fillRect(54, 90, 176, 6, kBg);
+    const int w = peak * 176 / 32767;
+    lcd.fillRect(54, 90, w, 6, peak > 20000 ? kWarn : kOk);
+}
+
 void writeHeader(uint32_t dataBytes)
 {
     WavHeader h{};
@@ -157,12 +170,16 @@ void beginMic()
     M5.Mic.end();
     M5.Speaker.end();   // official Cardputer mic_wav_record sequence
     delay(100);
+    auto mc = M5.Mic.config();
+    mc.sample_rate = kRate;
+    mc.magnification = 64;  // software mic gain (default 16)
+    M5.Mic.config(mc);
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
         delay(1200);  // ES8311 ADC warm-up
     }
-    Serial.printf("[rec] mic=%d\n", micOk ? 1 : 0);
+    Serial.printf("[rec] mic=%d gain=%d\n", micOk ? 1 : 0, mc.magnification);
 }
 
 void stopRecording()
@@ -223,10 +240,10 @@ void recordLoop()
             snprintf(status, sizeof(status), "MIC BUSY");
             break;
         }
-        // 240 samples are 15 ms; give the DMA one block before reusing the
-        // other buffer.  Alternate buffers so a slow drain cannot overwrite
-        // the block we are about to write.
-        delay(20);
+        // 100 ms of audio; leave only 2 ms for the next DMA block.  This
+        // keeps the WAV continuous instead of dropping 5 ms every block.
+        const uint32_t blockMs = static_cast<uint32_t>(kBlock) * 1000u / kRate;
+        delay(blockMs + 2);
         if (samples == 0) writeHeader(0);
         const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf[bufIndex]), kBlock * 2);
         if (wrote != kBlock * 2) {
@@ -243,8 +260,7 @@ void recordLoop()
         samples += kBlock;
         if (++drawCounter >= 8) {
             drawCounter = 0;
-            dirty = true;
-            draw();
+            drawLive();
         }
         const bool sNow = M5Cardputer.Keyboard.isKeyPressed('s') ||
                           M5Cardputer.Keyboard.isKeyPressed('S');
@@ -293,7 +309,7 @@ void playLast()
     f.close();
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.setVolume(160);
+    M5.Speaker.setVolume(255);
     M5.Speaker.playRaw(data.get(), (bytes - 44) / 2, kRate, false);
     while (M5.Speaker.isPlaying()) {
         M5Cardputer.update();
