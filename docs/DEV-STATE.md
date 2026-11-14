@@ -51,8 +51,8 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
   15 s 超时、30 s keepalive；SSH task 56 KB，串口每 30 s 打 heap/stack。
 - 终端 40×13，`ssh_terminal` 做基本 VT100（光标/清屏/SGR 忽略/滚动）；
   `Fn+BKSP` 退出会话，`Fn+Q` 关闭。
-- 已知限制：无加密私钥/RSA、无无限自动重连（错误页 R 手动重试）、
-  备用屏只清屏、UTF-8 只做 ASCII 回退；SSH/WiFi 密码均为 NVS 明文。
+- 已知限制：无加密私钥/RSA、无无限自动重连（错误页/列表 R 手动重试）、
+  UTF-8 只做 ASCII 回退、滚动区/插入删除行不完整；SSH/WiFi 密码均为 NVS 明文。
 
 > 下面 §1–§14 是历史记录，按时间保留；与 §0 冲突时以 §0 和最新代码为准。
 > `retry/` 是独立参考工程，源码仍在 git 中；不要在出货固件里引用它。
