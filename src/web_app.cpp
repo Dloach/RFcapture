@@ -219,9 +219,37 @@ void sendDownload()
         server.send(404, "text/plain", "not found");
         return;
     }
+    const size_t bytes = f.size();
+    server.setContentLength(bytes);
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + baseName(path) + "\"");
-    server.streamFile(f, "application/octet-stream");
+    server.send(200, "application/octet-stream", "");
+
+    WiFiClient client = server.client();
+    client.setNoDelay(true);
+    uint8_t buf[1024];
+    size_t sent = 0;
+    const uint32_t start = millis();
+    while (f.available() && client.connected()) {
+        const size_t n = f.read(buf, sizeof(buf));
+        if (n == 0) break;
+        size_t off = 0;
+        while (off < n) {
+            const size_t w = client.write(buf + off, n - off);
+            if (w == 0) {
+                delay(1);
+                if (millis() - start > 30000) break;
+                continue;
+            }
+            off += w;
+            sent += w;
+        }
+        delay(1);
+        if (millis() - start > 30000) break;
+    }
     f.close();
+    client.flush();
+    Serial.printf("[web] download %s %u/%u\n", path.c_str(), static_cast<unsigned>(sent),
+                  static_cast<unsigned>(bytes));
 }
 
 void sendDelete()
