@@ -148,8 +148,8 @@ bool openRecording()
 
 void beginMic()
 {
-    M5.Speaker.end();
-    delay(120);  // let the ES8311/I2S teardown settle before reconfiguring
+    // Cardputer ADV shares the ES8311/I2S between speaker and mic; do not end
+    // the speaker here, that can leave the codec powered down.
     micOk = M5.Mic.begin();
     if (micOk) {
         M5.Mic.setSampleRate(kRate);
@@ -205,9 +205,10 @@ void recordLoop()
             if (!armed) delay(5);
         }
         if (!armed) {
-            snprintf(status, sizeof(status), "MIC BUSY");
+            snprintf(status, sizeof(status), "MIC BUSY"); 
             break;
         }
+        const uint32_t blockStart = millis();
         while (M5.Mic.isRecording()) {
             M5Cardputer.update();
             if (M5Cardputer.Keyboard.isKeyPressed('`') ||
@@ -224,8 +225,16 @@ void recordLoop()
             }
             delay(1);
         }
+        // isRecording() can go 0 just before the capture task publishes the
+        // completed block; never write the buffer before its time window.
+        const uint32_t blockMs = static_cast<uint32_t>(kBlock) * 1000u / kRate;
+        while (millis() - blockStart < blockMs + 20) delay(1);
         if (samples == 0) writeHeader(0);
-        wav.write(reinterpret_cast<const uint8_t*>(buf), kBlock * 2);
+        const size_t wrote = wav.write(reinterpret_cast<const uint8_t*>(buf), kBlock * 2);
+        if (wrote != kBlock * 2) {
+            snprintf(status, sizeof(status), "SD WRITE FAILED");
+            break;
+        }
         samples += kBlock;
         int p = 0;
         for (size_t i = 0; i < kBlock; ++i) {
