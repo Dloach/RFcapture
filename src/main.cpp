@@ -27,6 +27,7 @@
 #include "ssh_app.h"
 #include "ui_prefs.h"
 #include "usbdisk_app.h"
+#include <USB.h>
 
 namespace {
 
@@ -121,6 +122,9 @@ void setup()
             break;
     }
 
+    // CDC is no longer started by the core before setup(): USB DISK has to
+    // register its MSC interface first so the descriptor includes it.
+    USB.begin();
     uiprefs::begin();
     uiprefs::applyBrightness();
 }
