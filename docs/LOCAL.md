@@ -118,3 +118,5 @@ Cardputer 会以 USB MSC 设备出现，电脑直接读取整张 TF 卡。实现
 - [Cardputer-USB-ADV](https://github.com/Jay-Jayismyname1/Cardputer-USB-ADV-)：Cardputer ADV 的 TF→USB MSC 参考；
 - [TinyUSB MSC example](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/usb/device/tusb_msc)：ESP-IDF MSC 回调模型；
 - M5Unified `Power_Class`：`getBatteryLevel()` / `getBatteryVoltage()` / `isCharging()`。
+
+ʵ�⣺Cardputer ADV + Windows �ɷ��ֲ��� USB DISK �̷���2026-11-14����
