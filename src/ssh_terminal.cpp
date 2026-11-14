@@ -15,6 +15,10 @@ int histCount    = 0;
 int historyNext  = 0;
 int row          = 0;
 int col          = 0;
+int scrollTop    = 0;
+int scrollBot    = kRows - 1;
+int savedRow     = 0;
+int savedCol     = 0;
 uint8_t curFg    = 7;
 uint8_t curBg    = 0;
 bool reverse     = false;
@@ -51,6 +55,10 @@ void clearLocked()
     for (int r = 0; r < kRows; ++r) blankRow(r);
     row      = 0;
     col      = 0;
+    scrollTop = 0;
+    scrollBot = kRows - 1;
+    savedRow  = 0;
+    savedCol  = 0;
     curFg    = 7;
     curBg    = 0;
     reverse  = false;
@@ -70,16 +78,22 @@ void pushHistory(const Cell* line)
 
 void scrollLocked()
 {
-    pushHistory(screen[0]);
-    for (int r = 1; r < kRows; ++r) memcpy(screen[r - 1], screen[r], sizeof(screen[r]));
-    blankRow(kRows - 1);
-    row = kRows - 1;
+    pushHistory(screen[scrollTop]);
+    for (int r = scrollTop + 1; r <= scrollBot; ++r) {
+        memcpy(screen[r - 1], screen[r], sizeof(screen[r]));
+    }
+    blankRow(scrollBot);
+    row = scrollBot;
 }
 
 void newlineLocked()
 {
     col = 0;
-    if (++row >= kRows) scrollLocked();
+    if (row >= scrollBot) {
+        scrollLocked();
+    } else {
+        ++row;
+    }
 }
 
 void putCellLocked(char c)
@@ -235,15 +249,69 @@ void csiFinalLocked(char final, const char* args)
         }
     } else if (final == 'S') {
         for (int n = parseNum(args, 1); n > 0; --n) scrollLocked();
-        row = kRows - 1;
+        row = scrollBot;
         col = 0;
     } else if (final == 'T') {
         for (int n = parseNum(args, 1); n > 0; --n) {
-            for (int r = kRows - 1; r > 0; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
-            blankRow(0);
+            for (int r = scrollBot; r > scrollTop; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
+            blankRow(scrollTop);
         }
-        row = kRows - 1;
+        row = scrollBot;
         col = 0;
+    } else if (final == 'L') {
+        for (int n = parseNum(args, 1); n > 0; --n) {
+            for (int r = scrollBot; r > row; --r) memcpy(screen[r], screen[r - 1], sizeof(screen[r]));
+            blankRow(row);
+        }
+    } else if (final == 'M') {
+        for (int n = parseNum(args, 1); n > 0; --n) {
+            for (int r = row; r < scrollBot; ++r) memcpy(screen[r], screen[r + 1], sizeof(screen[r]));
+            blankRow(scrollBot);
+        }
+    } else if (final == 'P') {
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kCols - col) n = kCols - col;
+        for (int c = col; c < kCols - n; ++c) screen[row][c] = screen[row][c + n];
+        for (int c = kCols - n; c < kCols; ++c) screen[row][c] = Cell{' ', 7, 0};
+    } else if (final == '@') {
+        int n = parseNum(args, 1);
+        if (n < 1) n = 1;
+        if (n > kCols - col) n = kCols - col;
+        for (int c = kCols - 1; c >= col + n; --c) screen[row][c] = screen[row][c - n];
+        for (int c = col; c < col + n; ++c) screen[row][c] = Cell{' ', 7, 0};
+    } else if (final == 'r') {
+        int top = 1, bottom = kRows;
+        const char* semi = strchr(args, ';');
+        if (semi != nullptr) {
+            char a[12];
+            const int n = semi - args;
+            if (n > 0 && n < (int)sizeof(a)) {
+                memcpy(a, args, n);
+                a[n] = 0;
+                top = parseNum(a, 1);
+            }
+            bottom = parseNum(semi + 1, kRows);
+        } else {
+            top = parseNum(args, 1);
+        }
+        if (top < 1) top = 1;
+        if (bottom > kRows) bottom = kRows;
+        if (top >= bottom) return;
+        scrollTop = top - 1;
+        scrollBot = bottom - 1;
+        row       = scrollTop;
+        col       = 0;
+    } else if (final == 's') {
+        savedRow = row;
+        savedCol = col;
+    } else if (final == 'u') {
+        row = savedRow;
+        col = savedCol;
+        if (row < 0) row = 0;
+        if (row >= kRows) row = kRows - 1;
+        if (col < 0) col = 0;
+        if (col >= kCols) col = kCols - 1;
     } else if (final == 'm') {
         applySgrLocked(args);
     } else if ((final == 'h' || final == 'l') && strstr(args, "1049") != nullptr) {
@@ -321,6 +389,14 @@ void feed(const char* data, int len)
                 csiArgs[0]  = 0;
             } else if (c == ']') {
                 parserState = 3;
+            } else if (c == '7') {
+                savedRow    = row;
+                savedCol    = col;
+                parserState = 0;
+            } else if (c == '8') {
+                row         = savedRow;
+                col         = savedCol;
+                parserState = 0;
             } else {
                 parserState = 0;
             }
