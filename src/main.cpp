@@ -41,6 +41,11 @@ App* g_rf         = nullptr;
 
 void setup()
 {
+    // Register CDC before any app calls USB.begin().  CDC_ON_BOOT is 0 so the
+    // core does not do this for us; without it a launcher-only boot enumerates
+    // HID but no COM port, and a wired flash cannot find the board.
+    Serial.begin(115200);
+
     // Deselect every device on the shared SPI bus (SCK 40 / MOSI 14 / MISO 39)
     // before anything touches it, and keep the module powered.
     //
