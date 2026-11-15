@@ -29,6 +29,7 @@
 #include "ssh_app.h"
 #include "ui_prefs.h"
 #include "usbdisk_app.h"
+#include "usb_log.h"
 #include "web_app.h"
 #include "rec_app.h"
 #include <USB.h>
@@ -43,6 +44,16 @@ Running g_running = Running::kMenu;
 App* g_rf         = nullptr;
 
 }  // namespace
+
+void usbLogf(const char* format, ...)
+{
+    char buffer[160];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    usbSerial.println(buffer);
+}
 
 void setup()
 {
@@ -158,6 +169,9 @@ void setup()
     USB.begin();
     uiprefs::begin();
     uiprefs::applyBrightness();
+
+    // First line the host can actually read back over USB.
+    usbLogf("boot app=%u", static_cast<unsigned>(app));
 }
 
 void loop()
