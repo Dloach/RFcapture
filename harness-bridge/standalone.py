@@ -294,6 +294,7 @@ def session_summary(item: dict) -> dict:
         "title": one_line(first_user, 36) or "New session",
         "preview": one_line(last, 46) or "No messages yet",
         "updatedAt": updated,
+        "empty": not msgs,
     }
 
 
@@ -345,7 +346,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth():
                 return
             if u.path == "/cardputer/sessions":
-                items = [session_summary(s) for s in acp().list_sessions()]
+                items = [
+                    session_summary(x) for x in acp().list_sessions()
+                    if "cardputer" in str(x.get("cwd", "")).lower()
+                ]
+                items = [s for s in items if not s.get("empty")]
                 items.sort(key=lambda s: s.get("updatedAt", 0), reverse=True)
                 return self._json(200, {"sessions": items})
             if u.path == "/cardputer/messages":

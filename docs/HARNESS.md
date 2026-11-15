@@ -53,6 +53,7 @@ POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
 launcher → **HARNESS** 首先进入 **Session 列表**（不是默认聊天）：
 
 - 每项显示首条用户内容作为标题，下面显示短 ID + 最后一条消息预览；
+- 空会话不进入列表（避免反复新建产生一堆 “New session”）；
 - `;` / `.` 上下移动，列表自动滚动，光标不会跑出屏幕；
 - `ENT` 打开当前高亮 Session；
 - `Fn+N` 新建会话并直接进入；

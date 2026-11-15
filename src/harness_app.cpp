@@ -506,15 +506,20 @@ void createAndOpen()
         dirty = true;
         return;
     }
-    if (!fetchSessions()) {
-        status = "LIST FAILED";
-        dirty = true;
-        return;
+    const String newId = sessionId;
+    fetchSessions();
+    int idx = sessionIndex(newId);
+    if (idx < 0) {
+        SessionItem s;
+        s.id = newId;
+        s.title = "New session";
+        s.preview = "No messages yet";
+        sessions.insert(sessions.begin(), s);
+        idx = 0;
     }
-    const int idx = sessionIndex(sessionId);
-    sessSel = idx >= 0 ? idx : 0;
+    sessSel = idx;
     keepSelectionVisible();
-    openChatIndex(sessSel);
+    openChatIndex(idx);
 }
 
 void loadSessionList()
@@ -606,6 +611,7 @@ void handleChat()
             continue;
         }
         if (fn && (c == 's' || c == 'S')) {
+            fetchSessions();
             const int idx = sessionIndex(sessionId);
             sessSel = idx >= 0 ? idx : 0;
             keepSelectionVisible();
@@ -649,6 +655,7 @@ void handleChat()
     if (!ks.enter) prevEnter = false;
 
     if (M5Cardputer.Keyboard.isKeyPressed('`') && !prevEsc) {
+        fetchSessions();
         const int idx = sessionIndex(sessionId);
         sessSel = idx >= 0 ? idx : 0;
         keepSelectionVisible();
