@@ -12,7 +12,9 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher 十一功能 **RF TOOLS / RF LAB / NFC TOOLS / KEYBOARD / SSH / FILES / BADUSB / USB DISK / WEB FILES / RECORDER / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格 |
+| 功能结构 | launcher **十二功能** **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / HARNESS / FILES / BADUSB / USB DISK / WEB FILES / RECORDER / DRUM / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；**RF LAB 已并入 RF TOOLS 首页**（`CAPTURE / SEND / SCAN RF / RF LAB`，第 4 项重启进 `kAppRfLab`）；**IR TOOLS 已从固件移除**（源码保留，`env:cardputer-ir` 编回） |
+| IR TOOLS | **2026-11-16 已从出货固件移除**（源码保留、`env:cardputer-ir` 可编回）：发射链已证实（手机摄像头能看到 LED），但空调本体始终没被触发，机型变体没法在无接收模块时确认。详见下一条与 `docs/IR.md`、§15 |
+| IR 协议 | G44 只有发射 LED，板载无接收头（原理图 IR1 + R14 22 Ω 证实）；38 kHz 由 RMT 硬件调制；协议 NEC/NECext/Samsung32/RC5/RC5X/RC6/SIRC/Kaseikyo/Gree(格力) + raw，兼容 Flipper `.ir`；学习需外接 38 kHz 模块（G1/G2） |
 | RF LAB | 频谱瀑布、`.sub` 导入导出、EV1527/PT2262/CAME/Nice 生成、包络调制分析、信号编辑/重发/频偏；详见 `docs/RF-LAB.md` |
 | WEB FILES | WiFi HTTP TF 浏览器/上传/下载/删除，`admin/cardputer`，仅可信 LAN；详见 `docs/WEB-REC.md` |
 | RECORDER | ES8311 麦克风 16 kHz mono WAV → `/recordings`；`S` 录/停，`P` 回放 |
@@ -1198,3 +1200,71 @@ pio run -d Y:\2026\cardputer\retry -e retry-emu -t upload --upload-port COM10
 - retry 还没有 TF 备份/恢复（主固件有，可移植）。
 - rename（`N` 键）已实现未测。
 - 主固件的 `nfc-read` 可以废弃，或者只保留其"读取+收藏"部分。
+
+## 15. IR TOOLS 红外收发（2026-11-15 立项，✅ 编译 + host 测试全过，❌ 未上机）
+
+### 15.1 硬件结论（有证据，不是推测）
+
+- 板顶那颗写着 G44 的「IR 模块」是**一颗 2 脚红外发射 LED**：原理图
+  `Sch_M5CardputerAdv_v1.0` 里只有 `IR1`（2 个 pin）+ `R14 22R/1%`，
+  没有任何 3 脚接收器件。
+- **没有板载接收头**。三份独立资料一致：M5 官方 `ir_nec` 例程只给 `IR_TX_PIN 44`；
+  社区 pinout 文档只有 `IR_TX = 44`；Flipper 移植版 README 原文
+  "Learning needs a receiver, which neither Cardputer has"。
+- G44 是**直驱**：22 Ω 限流，没有载波振荡电路。38 kHz 必须自己产生——
+  所以用 RMT 外设的载波调制器，而不是软件 bit-bang（后者在 8 ms 帧里抖到无法解码）。
+- 想学习必须在 Grove 口外接 38 kHz 解调模块（VS1838B / HX1838 / TSOP38238 /
+  Unit-IR U002）：`VCC→5V`、`GND→GND`、`OUT→G1`（默认，可切 G2）。
+
+### 15.2 设计取舍
+
+- **不引入第三方红外库**。Arduino-IRremote 是 M5 官方例程用的、IRremoteESP8266 协议最全，
+  但两者都要么带自己的 RMT 抢占、要么把空调协议栈整个塞进固件（体积 + LVGL 式耦合）。
+  本固件只需要「解析码 + 原始波形」进出，所以协议引擎自己写，纯 C++，
+  `tests/host/test_ir.cpp` 上 PC 跑 193 条断言。
+- **兼容目标选 Flipper `.ir`**，不是自造格式：Flipper-IRDB 有两万个现成遥控文件，
+  TF 卡放 `/ir/` 就能直接用。时间参数和位序照 Flipper 固件
+  `lib/infrared/encoder_decoder` 的实现来（RC5 与 RC6 的 Manchester 极性相反，
+  照抄才不会把波形发反）。
+- 码库只存**解析码**（NVS 一个 blob，48 条）；raw 帧 200–600 个跳变太大，走 TF 卡。
+
+### 15.3 已做过什么验证
+
+- `pio run -e cardputer-adv` 通过：Flash 72.2%（2413 kB），RAM 58.5%（192 kB）。
+- host 测试 400 项全过（新增 193 协议 + 150 `.ir` 解析）。
+- 拿真实文件端到端跑过：Flipper-IRDB 的三星电视 `.ir`（`Samsung32 A=7 C=2` 就是
+  公认的三星电源键）、Flipper 官方 `tv.ir`（索尼 `SIRC A=1 C=15`）、
+  Midea 空调 raw 文件（199 个跳变/键）——解析 → 编码 → 解码 都对得上。
+- **格力空调协议按真机抓包验证过**：用 IRremoteESP8266 单元测试里那份真机捕获
+  （upstream issue #386）作向量，解码必须逐字节得到 `19 0A 60 50 02 23 00 F0`，
+  再重新编码后与原波形 138/138 个跳变吻合（±12%）；Flipper-IRDB `ACs/GREE/`
+  四个文件共 21 帧，Kelvinator 校验和 21/21 全过。这里踩过一个坑：手工从 `.ir`
+  里截帧时把尾部几项截掉了，导致 byte7 不对、误判"校验和算法错"——要用整个
+  `data:` 条目，别自己数长度。
+- **上机验证（2026-11-15 23:52 起，本机 COM13）**：`env:ir-selftest` 固件跑了 6 轮，
+  每轮 `tx=1 burst=1 nec_send=1 timings=67 gree_send=1 gree=140`——RMT 通道建好、
+  载波突发、整帧 NEC 和一帧格力空调状态都被 `rmt_write_items` 接受，应用没 panic。
+  出货固件随后刷回，端口重新枚举正常。
+
+**抓 USB 日志的坑**：`usbLogf` 走 TinyUSB CDC，TinyUSB 以 DTR 判断主机在听；
+.NET/PowerShell 打开串口默认不拉 DTR，所以日志看起来是"完全没有输出"。
+`$port.DtrEnable = $true` 才有。同理，烧录后芯片可能停在 ROM 下载模式，
+要用 `esptool --before no_reset --after hard_reset chip_id` 打一次硬复位。
+
+### 15.4 还没验证 / 下一步
+
+1. **LED 已确认会亮**：2026-11-16 00:1x，用户用手机摄像头对顶部看，`SETUP → LED TEST`
+   能看到淡紫色光。至此「编码 → RMT 载波 → G44 → LED」整条发射链在真机上闭环，
+   只剩「空调认不认这串字节」未验证。
+2. **格力空调本体没被触发**（用户实测：AIR CON → ENT，YAPOF / YAW1F / BOTH 三套都没反应）。
+   发射链和帧格式都对（21 帧真机抓包校验和全过 + 官方抓包逐字节一致），所以嫌疑集中在
+   机型变体：`byte2` 的 ModelA、`byte5` 的 WiFi/unknown2 已做成 MODEL 行，但真实机型
+   还可能有第三套写法（例如 9 字节/带定时字节的版本）。
+   **下一步只有一个确定解**：买一个 38 kHz 接收模块（几块钱，Grove 口 G1），用 LEARN
+   抓一次原遥控器的「开机」帧，把那 8 个字节跟本固件生成的对比，差在哪一位就补哪一位。
+3. RC6 是按 Flipper 编码器实现的最佳努力版本，没有真实飞利浦设备验证。
+4. 空调只能回放整帧 raw，不做状态机（要温度/模式控制得移植 IRac）。
+5. 发射电流没实测：LED 直流接在 GPIO 上，现在占空比取 33%，长时间连发要留意压降。
+6. 学习端（RMT 接收 + 分帧）**一行都没在硬件上跑过**：没有接收模块时学习页只会
+   显示 `NO RECEIVER`，所以 `ir_rx.cpp` 的 ring buffer 分帧、20 ms 空闲阈值、
+   模块 AGC 对长脉冲的拉伸，全部待测。

@@ -8,6 +8,8 @@ node_modules/
 tests/host/*.exe
 tests/host/test_decoder
 tests/host/test_ssh_terminal
+tests/host/test_ir
+tests/host/test_ir_file
 *.pdb
 *.obj
 *.ilk

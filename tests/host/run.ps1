@@ -1,4 +1,4 @@
-# Build and run the host side decoder tests.
+# Build and run the host side tests.
 #
 # Works with any C++17 compiler.  The script looks, in this order, for:
 #   1. -Compiler <path> argument
@@ -21,6 +21,10 @@ $out = Join-Path $root "tests\host\test_decoder.exe"
 $sources = @("tests\host\test_decoder.cpp", "src\ook_decoder.cpp")
 $termOut = Join-Path $root "tests\host\test_ssh_terminal.exe"
 $termSources = @("tests\host\test_ssh_terminal.cpp", "src\ssh_terminal.cpp")
+$irOut = Join-Path $root "tests\host\test_ir.exe"
+$irSources = @("tests\host\test_ir.cpp", "src\ir_protocol.cpp")
+$irFileOut = Join-Path $root "tests\host\test_ir_file.exe"
+$irFileSources = @("tests\host\test_ir_file.cpp", "src\ir_file.cpp")
 
 $exe = ""
 $isZig = $false
@@ -94,6 +98,38 @@ if ($LASTEXITCODE -ne 0) {
     throw "terminal test build failed"
 }
 & $termOut
+if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+
+$irBuildArgs = @("-std=c++17", "-Wall", "-Wextra", "-I", "tests/host/stubs", "-I", "src", "-o", $irOut) + $irSources
+if ($isZig) {
+    Write-Host "Building IR protocol tests with zig: $exe"
+    & $exe c++ @irBuildArgs
+} else {
+    Write-Host "Building IR protocol tests with: $exe"
+    & $exe @irBuildArgs
+}
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    throw "IR protocol test build failed"
+}
+& $irOut
+if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+
+# The .ir parser test brings its own stubs for the ir:: functions, so
+# ir_protocol.cpp is deliberately not linked here.
+$irFileBuildArgs = @("-std=c++17", "-Wall", "-Wextra", "-I", "tests/host/stubs", "-I", "src", "-o", $irFileOut) + $irFileSources
+if ($isZig) {
+    Write-Host "Building Flipper .ir tests with zig: $exe"
+    & $exe c++ @irFileBuildArgs
+} else {
+    Write-Host "Building Flipper .ir tests with: $exe"
+    & $exe @irFileBuildArgs
+}
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    throw "Flipper .ir test build failed"
+}
+& $irFileOut
 if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
 
 Pop-Location

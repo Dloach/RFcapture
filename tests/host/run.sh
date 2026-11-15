@@ -22,6 +22,12 @@ out="tests/host/test_decoder"
 sources=("tests/host/test_decoder.cpp" "src/ook_decoder.cpp")
 term_out="tests/host/test_ssh_terminal"
 term_sources=("tests/host/test_ssh_terminal.cpp" "src/ssh_terminal.cpp")
+# IR protocol engine: pure C++, no Arduino headers.
+ir_out="tests/host/test_ir"
+ir_sources=("tests/host/test_ir.cpp" "src/ir_protocol.cpp")
+# Flipper .ir parser: brings its own stubs for the ir:: symbols.
+ir_file_out="tests/host/test_ir_file"
+ir_file_sources=("tests/host/test_ir_file.cpp" "src/ir_file.cpp")
 
 compiler="${COMPILER:-}"
 
@@ -99,3 +105,25 @@ else
 fi
 echo
 "$term_out"
+
+ir_args=(-std=c++17 -O2 -Wall -Wextra -I tests/host/stubs -I src -o "$ir_out" "${ir_sources[@]}")
+echo
+echo "Building IR protocol tests with: $compiler"
+if [[ "$is_zig" == true ]]; then
+    "$compiler" c++ "${ir_args[@]}"
+else
+    "$compiler" "${ir_args[@]}"
+fi
+echo
+"$ir_out"
+
+ir_file_args=(-std=c++17 -O2 -Wall -Wextra -I tests/host/stubs -I src -o "$ir_file_out" "${ir_file_sources[@]}")
+echo
+echo "Building Flipper .ir tests with: $compiler"
+if [[ "$is_zig" == true ]]; then
+    "$compiler" c++ "${ir_file_args[@]}"
+else
+    "$compiler" "${ir_file_args[@]}"
+fi
+echo
+"$ir_file_out"

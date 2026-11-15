@@ -64,7 +64,7 @@ bool looksLikeOok(const RfFrame& f)
     return hasSync && total >= 20 && good * 100 >= total * 80;
 }
 
-constexpr int kHomeItems = 3;
+constexpr int kHomeItems = 4;
 
 }  // namespace
 
@@ -513,6 +513,12 @@ void App::handleAction(uint32_t action)
                     break;
                 case 2:
                     enterScan();
+                    break;
+                case 3:
+                    // RF LAB has its own boot (its own SPI and timing setup),
+                    // so it is a reboot into launcher::kAppRfLab rather than a
+                    // page inside this app -- same rule as every other feature.
+                    launcher::rebootInto(launcher::kAppRfLab);
                     break;
             }
         }
@@ -1069,12 +1075,12 @@ void App::renderHome()
     renderHeader("RF CAPTURE", true);
 
     canvas_.setTextSize(2);
-    const char* items[kHomeItems] = {"CAPTURE", "SEND", "SCAN RF"};
+    const char* items[kHomeItems] = {"CAPTURE", "SEND", "SCAN RF", "RF LAB"};
     for (int i = 0; i < kHomeItems; ++i) {
-        // Three items spread across the whole 13..118 body rather than stacked
-        // at the top: y = 30/58/86 leaves the selection boxes centred with the
-        // footer rule at 118.
-        const int y         = 30 + i * 28;
+        // Four items spread across the whole 13..118 body rather than stacked
+        // at the top: y = 24/47/70/93 keeps the selection boxes centred with
+        // the footer rule at 118.
+        const int y         = 24 + i * 23;
         const bool selected = (i == homeSel_);
         if (selected) {
             canvas_.fillRect(4, y - 4, canvas_.width() - 8, 22, kColBar);
