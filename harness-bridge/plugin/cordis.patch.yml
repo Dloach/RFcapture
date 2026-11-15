@@ -3,7 +3,7 @@
       name: '@local/dsh-cardputer-bridge'
       config:
         host: '0.0.0.0'
-        port: 8765
+        port: 9100
         token: 'cardputer-dev'
         workspace: 'Y:\2026\cardputer'
         python: 'Y:\2026\cardputer\harness-bridge\.venv\Scripts\python.exe'

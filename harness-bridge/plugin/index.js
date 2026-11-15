@@ -1,9 +1,15 @@
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { writeFileSync, unlinkSync } from 'node:fs'
+import { appendFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+
+const LOG = 'C:/Users/dloach/.dsh/cardputer-bridge.log'
+function log(msg) {
+  try { appendFileSync(LOG, `${new Date().toISOString()} ${msg}\n`) } catch {}
+}
+log('module loaded')
 
 const DEFAULTS = {
   host: '0.0.0.0',
@@ -61,6 +67,7 @@ async function readBody(req, limit = 8 * 1024 * 1024) {
 
 export function apply(rootCtx, config) {
   const cfg = { ...DEFAULTS, ...config }
+  log(`apply host=${cfg.host} port=${cfg.port} effect=${typeof rootCtx.effect}`)
 
   const getSessionController = () =>
     rootCtx.sessionController ?? rootCtx.get?.('sessionController')
@@ -191,12 +198,16 @@ export function apply(rootCtx, config) {
   })
 
   server.on('error', (error) => {
+    log(`listen failed ${error?.message ?? error}`)
     rootCtx.logger?.warn?.(`cardputer-bridge listen failed: ${error?.message ?? error}`)
   })
 
   rootCtx.effect(() => {
+    log('effect start')
     const timer = setTimeout(() => {
+      log('calling listen')
       server.listen(cfg.port, cfg.host, () => {
+        log(`listening on ${cfg.host}:${cfg.port}`)
         rootCtx.logger?.info?.(`cardputer-bridge listening on http://${cfg.host}:${cfg.port}`)
       })
     }, 1200)

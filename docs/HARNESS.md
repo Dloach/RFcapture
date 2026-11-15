@@ -1,6 +1,6 @@
 # Cardputer ↔ DeepSeek Harness
 
-Status: **host bridge and Cardputer app are implemented and compile; not yet installed/tested against the running Desktop profile.**
+Status: **standalone bridge is running and tested on the host; Cardputer app is compiled and flashed.**
 
 ## Architecture
 
@@ -8,15 +8,16 @@ Status: **host bridge and Cardputer app are implemented and compile; not yet ins
 Cardputer HARNESS app
    HTTP (LAN, X-Cardputer-Token)
         ↓
-dsh-cardputer-bridge (DSH Host plugin, port 8765)
+harness-bridge/standalone.py (port 9100)
         ↓
-ctx.sessionController
+dsh --profile cardputer (ACP child process, NDJSON JSON-RPC)
         ↓
-the same DSH Session (messages, prompt, running state)
+the same persisted DSH sessions
 ```
 
-The bridge does **not** pretend to be a browser and does not open a second
-session unless asked. It calls the Host session controller directly.
+The bridge is **not** a DSH profile plugin. It runs as a separate process, so the
+desktop profile never loads a third-party bundle and never shows the safe-mode
+prompt.
 
 HTTP endpoints:
 
@@ -30,7 +31,40 @@ POST /cardputer/cancel    {"session":"<id>"}
 POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
 ```
 
-## DSH plugin
+## Standalone runtime
+
+```text
+C:\Users\dloach\dsh-standalone
+```
+
+Start:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\harness-bridge\run-standalone.ps1
+```
+
+Bridge:
+
+```text
+http://192.168.0.88:9100/
+```
+
+The ACP child uses:
+
+```text
+dsh --profile cardputer
+```
+
+Profile:
+
+```text
+C:\Users\dloach\.dsh\profiles\cardputer
+```
+
+It composes `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-acp-app`; it is separate
+from the desktop profile.
+
+## DSH plugin (legacy)
 
 Install directory:
 

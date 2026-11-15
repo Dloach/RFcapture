@@ -27,7 +27,7 @@ constexpr uint16_t kOk     = 0x07E0;
 constexpr uint16_t kWarn   = 0xF800;
 constexpr uint16_t kBar    = 0x2104;
 constexpr uint16_t kHead   = 0x18E3;
-constexpr uint16_t kPort   = 8765;
+constexpr uint16_t kPort   = 9100;
 constexpr int kChatLines   = 8;
 
 auto& lcd = M5Cardputer.Display;
