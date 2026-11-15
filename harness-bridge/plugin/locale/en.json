@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cardputer bridge",
+    "description": "LAN HTTP bridge that lets a Cardputer read the current Harness session, send prompts, and upload voice notes."
+  }
+}

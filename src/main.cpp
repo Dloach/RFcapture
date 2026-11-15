@@ -19,6 +19,7 @@
 #include "backup_app.h"
 #include "badusb_app.h"
 #include "files_app.h"
+#include "harness_app.h"
 #include "kbd_app.h"
 #include "launcher.h"
 #include "nfc_app.h"
@@ -35,7 +36,7 @@
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb, kRec };
+enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb, kRec, kHarness };
 
 USBCDC usbSerial(0);
 Running g_running = Running::kMenu;
@@ -141,6 +142,11 @@ void setup()
             recapp::setup();
             break;
 
+        case launcher::kAppHarness:
+            g_running = Running::kHarness;
+            harnessapp::setup();
+            break;
+
         default:
             g_running = Running::kMenu;
             launcher::menuSetup();
@@ -195,6 +201,9 @@ void loop()
             break;
         case Running::kRec:
             recapp::loop();
+            break;
+        case Running::kHarness:
+            harnessapp::loop();
             break;
         default:
             launcher::menuLoop();

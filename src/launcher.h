@@ -37,6 +37,7 @@ enum App : uint8_t {
     kAppRfLab    = 10, // spectrum / sub import / generator / modulation lab
     kAppWeb      = 11, // WiFi HTTP file manager
     kAppRec      = 12, // microphone WAV recorder
+    kAppHarness  = 13, // DSH LAN bridge client
 };
 
 /// Which app this boot belongs to (from NVS).

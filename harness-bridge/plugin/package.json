@@ -1,0 +1,25 @@
+{
+  "name": "@local/dsh-cardputer-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LAN HTTP bridge between DeepSeek Harness sessions and the Cardputer",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale",
+    "docs",
+    "icon.svg",
+    "stt.py"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cardputer 直连桥",
+    "description": "让 Cardputer 通过局域网读取 Harness 会话、发送指令并上传语音的 HTTP 桥。"
+  }
+}
