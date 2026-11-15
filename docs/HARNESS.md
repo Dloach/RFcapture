@@ -1,6 +1,7 @@
 # Cardputer ↔ DeepSeek Harness
 
-Status: **standalone bridge is running and tested on the host; Cardputer app is compiled and flashed.**
+Status: standalone bridge tested; Cardputer HARNESS firmware flashed. The desktop
+profile never loads a third-party plugin.
 
 ## Architecture
 
@@ -10,82 +11,41 @@ Cardputer HARNESS app
         ↓
 harness-bridge/standalone.py (port 9100)
         ↓
-dsh --profile cardputer (ACP child process, NDJSON JSON-RPC)
+dsh --profile cardputer (ACP child, NDJSON JSON-RPC)
         ↓
-the same persisted DSH sessions
+persisted DSH sessions (%USERPROFILE%\.dsh\sessions)
 ```
 
-The bridge is **not** a DSH profile plugin. It runs as a separate process, so the
-desktop profile never loads a third-party bundle and never shows the safe-mode
-prompt.
+The bridge is a separate process. It does not install a DSH profile plugin, so
+it does not trigger the desktop safe-mode warning.
 
-HTTP endpoints:
-
-```text
-GET  /cardputer/health
-GET  /cardputer/sessions
-POST /cardputer/new       {"cwd":"Y:/2026/cardputer"}
-GET  /cardputer/messages?session=<id>&limit=80
-POST /cardputer/prompt    {"session":"<id>","text":"..."}
-POST /cardputer/cancel    {"session":"<id>"}
-POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
-```
-
-## Standalone runtime
-
-```text
-C:\Users\dloach\dsh-standalone
-```
-
-Start:
+## Start
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\harness-bridge\run-standalone.ps1
 ```
 
-Bridge:
+Health:
 
 ```text
-http://192.168.0.88:9100/
+http://192.168.0.88:9100/cardputer/health
 ```
 
-The ACP child uses:
+The bridge removes stale ACP children before starting. If it is force-killed, an
+orphan ACP child can hold a Session; the run script cleans only our own
+`dsh-standalone` + `cardputer` children.
+
+## API
 
 ```text
-dsh --profile cardputer
-```
-
-Profile:
-
-```text
-C:\Users\dloach\.dsh\profiles\cardputer
-```
-
-It composes `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-acp-app`; it is separate
-from the desktop profile.
-
-## DSH plugin (legacy)
-
-Install directory:
-
-```text
-Y:\2026\cardputer\harness-bridge\plugin
-```
-
-Local install path is staged to a **local NTFS directory** before installation,
-because pnpm junctions to the SMB `Y:` path were not resolvable by Node on
-this machine:
-
-```text
-C:\Users\dloach\.dsh\cardputer-bridge-plugin
-```
-
-Bridge config in `cordis.patch.yml`:
-
-```yaml
-host: 0.0.0.0
-port: 8765
-token: cardputer-dev
+GET  /cardputer/health
+GET  /cardputer/sessions
+POST /cardputer/new       {"cwd":"..."}
+GET  /cardputer/messages?session=<id>&limit=80
+POST /cardputer/prompt    {"session":"<id>","text":"..."}
+POST /cardputer/cancel    {"session":"<id>"}
+POST /cardputer/close     {"session":"<id>"}
+POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
 ```
 
 ## Cardputer app
@@ -101,26 +61,46 @@ launcher → **HARNESS**.
 
 NVS namespace `harness`: `host`, `token`, `session`.
 
-Voice model:
+## Windows 端看不到会话
+
+Cardputer 的 Session 写在：
 
 ```text
-Y:\2026\cardputer\harness-bridge\models\vosk-model-small-cn-0.22
+C:\Users\dloach\.dsh\sessions\--Y-2026-cardputer--\<sessionId>\
 ```
 
-Vosk venv:
+Desktop Web GUI 当前工作区是 `G:\Projects`，所以默认列表里看不到
+`Y:\2026\cardputer` 下的 Session。处理：
+
+1. 在 DSH 里打开/添加工作区 `Y:\2026\cardputer`；
+2. 刷新会话列表；
+3. 选择最新的 Session（可能暂时没有标题）。
+
+## 两端接力
+
+bridge 在每轮回复后自动 `session/close`，释放持久化 Session：
+
+1. Cardputer 发消息 → ACP 回复 → bridge close；
+2. Windows 打开同一个 Session，查看历史并继续；
+3. Windows 离开/关闭该 Session 后，Cardputer 再发消息，ACP resume 同一个 Session；
+4. Cardputer 的 `/messages` 读同一个 JSONL 历史，因此 Windows 端的回复也能显示。
+
+同一时间只能一端拥有活动 Agent；另一端发 prompt 会得到 `BUSY`/resume 错误。
+
+## 语音
 
 ```text
-Y:\2026\cardputer\harness-bridge\.venv
+Vosk model: Y:\2026\cardputer\harness-bridge\models\vosk-model-small-cn-0.22
+Vosk venv:  Y:\2026\cardputer\harness-bridge\.venv
 ```
 
-## Safety / limits
+Vosk is offline Chinese/English recognition; accuracy depends on the microphone
+and model. It is not a Chinese IME.
 
-- LAN only, no TLS; token is a simple shared secret.
-- Vosk is offline Chinese/English recognition; accuracy depends on mic and model.
-- Prompt acceptance is not completion; messages are polled, final assistant text
-  appears when committed. Token streaming is not used in this first version.
-- Tool permission prompts still belong to the DSH UI; this bridge does not
-  auto-approve tools.
-- The bridge plugin should not be enabled in the desktop profile until startup
-  is verified in isolation; earlier startup blocking caused a DSH safe-mode
-  prompt.
+## Known limits
+
+- LAN only, no TLS; token is a shared secret.
+- Prompt acceptance is not completion; the Cardputer polls committed history.
+- Tool permission requests are auto-allowed by the standalone bridge for this
+  trusted workspace. The desktop plugin path is intentionally not used.
+- The desktop and Cardputer cannot hold the same Agent simultaneously.

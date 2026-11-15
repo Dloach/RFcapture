@@ -57,6 +57,7 @@ class Acp:
         self.pending: dict[int, queue.Queue] = {}
         self.lock = threading.Lock()
         self.session_cache: dict[str, list[dict]] = {}
+        self.active: set[str] = set()
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
         atexit.register(self.proc.terminate)
@@ -138,18 +139,28 @@ class Acp:
         return self.request("session/list", {}, timeout=30).get("sessions", [])
 
     def new_session(self):
-        return self.request("session/new", {"cwd": WORKSPACE, "mcpServers": []}, timeout=60)
+        result = self.request("session/new", {"cwd": WORKSPACE, "mcpServers": []}, timeout=60)
+        sid = result.get("sessionId", "")
+        if sid:
+            self.active.add(sid)
+        return result
 
     def resume(self, sid):
-        return self.request("session/resume", {"sessionId": sid, "cwd": WORKSPACE}, timeout=60)
+        result = self.request("session/resume", {"sessionId": sid, "cwd": WORKSPACE}, timeout=60)
+        self.active.add(sid)
+        return result
+
+    def close(self, sid):
+        self.request("session/close", {"sessionId": sid}, timeout=60)
+        self.active.discard(sid)
 
     def prompt(self, sid, text):
+        # Resume is synchronous so a desktop-held Session surfaces as an HTTP
+        # error instead of a silently accepted prompt with no output.
+        if sid not in self.active:
+            self.resume(sid)
         # Do not hold the HTTP request until the whole agent turn finishes.
         def run():
-            try:
-                self.resume(sid)
-            except Exception as e:
-                sys.stderr.write(f"resume failed: {e}\n")
             try:
                 self.request("session/prompt", {
                     "sessionId": sid,
@@ -157,6 +168,13 @@ class Acp:
                 }, timeout=600)
             except Exception as e:
                 sys.stderr.write(f"prompt failed: {e}\n")
+            finally:
+                # Release the Session after the turn so the desktop Web UI can
+                # open the same persisted Session and continue the conversation.
+                try:
+                    self.close(sid)
+                except Exception as e:
+                    sys.stderr.write(f"close failed: {e}\n")
         threading.Thread(target=run, daemon=True).start()
 
 
@@ -297,6 +315,12 @@ class Handler(BaseHTTPRequestHandler):
                 if sid:
                     acp().request("session/cancel", {"sessionId": sid}, timeout=20)
                 return self._json(200, {"accepted": True})
+            if u.path == "/cardputer/close":
+                body = json.loads(self._body().decode() or "{}")
+                sid = body.get("session", "")
+                if sid:
+                    acp().close(sid)
+                return self._json(200, {"closed": True})
             if u.path == "/cardputer/stt":
                 return self._json(200, {"text": stt(self._body())})
             return self._json(404, {"error": "not found"})
