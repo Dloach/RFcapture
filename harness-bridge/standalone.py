@@ -33,12 +33,16 @@ DSH = Path(r"C:\Users\dloach\dsh-standalone")
 NODE = Path(r"C:\nvm4w\nodejs\node.exe")
 DSH_BIN = DSH / r"node_modules\@deepseek-ai\dsh\lib\bin.js"
 TOKEN = os.environ.get("CARDPUTER_TOKEN", "cardputer-dev")
-WORKSPACE = str(ROOT)
+WORKSPACE = os.environ.get(
+    "CARDPUTER_WORKSPACE",
+    r"\\192.168.0.222\project\2026\cardputer",
+)
 PORT = int(os.environ.get("CARDPUTER_PORT", "9100"))
 STT_PY = Path(r"Y:\2026\cardputer\harness-bridge\.venv\Scripts\python.exe")
 STT_SCRIPT = ROOT / "harness-bridge" / "plugin" / "stt.py"
 STT_MODEL = ROOT / "harness-bridge" / "models" / "vosk-model-small-cn-0.22"
 DSH_HOME = Path(os.environ.get("DSH_HOME", r"C:\Users\dloach\.dsh"))
+WORKSPACE_STORE = DSH_HOME / "storages" / "workspace.json"
 
 
 class Acp:
@@ -58,6 +62,7 @@ class Acp:
         self.lock = threading.Lock()
         self.session_cache: dict[str, list[dict]] = {}
         self.active: set[str] = set()
+        self.session_cwd: dict[str, str] = {}
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
         atexit.register(self.proc.terminate)
@@ -136,17 +141,25 @@ class Acp:
         return msg.get("result", {})
 
     def list_sessions(self):
-        return self.request("session/list", {}, timeout=30).get("sessions", [])
+        sessions = self.request("session/list", {}, timeout=30).get("sessions", [])
+        for s in sessions:
+            sid, cwd = s.get("sessionId"), s.get("cwd")
+            if sid and cwd:
+                self.session_cwd[sid] = cwd
+        return sessions
 
     def new_session(self):
         result = self.request("session/new", {"cwd": WORKSPACE, "mcpServers": []}, timeout=60)
         sid = result.get("sessionId", "")
         if sid:
             self.active.add(sid)
+            self.session_cwd[sid] = WORKSPACE
+            register_session(sid)
         return result
 
     def resume(self, sid):
-        result = self.request("session/resume", {"sessionId": sid, "cwd": WORKSPACE}, timeout=60)
+        cwd = self.session_cwd.get(sid, WORKSPACE)
+        result = self.request("session/resume", {"sessionId": sid, "cwd": cwd}, timeout=60)
         self.active.add(sid)
         return result
 
@@ -196,6 +209,35 @@ def find_session_log(session_id: str) -> Path | None:
         if session_id in str(p.parent):
             return p
     return None
+
+
+def register_session(session_id: str):
+    """Make an ACP-created Session visible in the desktop cardputer workspace."""
+    if not session_id or not WORKSPACE_STORE.exists():
+        return
+    try:
+        with open(WORKSPACE_STORE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        target = None
+        for ws in data.get("tables", {}).get("workspaces", {}).values():
+            if str(ws.get("path", "")).rstrip("\\/").lower() == WORKSPACE.rstrip("\\/").lower():
+                target = ws
+                break
+        if target is None:
+            return
+        ids = target.setdefault("sessionIds", [])
+        if session_id not in ids:
+            ids.append(session_id)
+            target["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+            backup = WORKSPACE_STORE.with_suffix(".json.harness-bak")
+            if not backup.exists():
+                backup.write_bytes(WORKSPACE_STORE.read_bytes())
+            tmp = WORKSPACE_STORE.with_suffix(".json.harness-tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, WORKSPACE_STORE)
+    except Exception as e:
+        sys.stderr.write(f"register session failed: {e}\n")
 
 
 def history(session_id: str) -> list[dict]:
