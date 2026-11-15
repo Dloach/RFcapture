@@ -9,6 +9,7 @@ No DSH plugin is installed.  The bridge owns:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
@@ -48,6 +49,8 @@ class Acp:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         self.next_id = 1
@@ -56,6 +59,7 @@ class Acp:
         self.session_cache: dict[str, list[dict]] = {}
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
+        atexit.register(self.proc.terminate)
         self.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {},
@@ -137,15 +141,15 @@ class Acp:
         return self.request("session/new", {"cwd": WORKSPACE, "mcpServers": []}, timeout=60)
 
     def resume(self, sid):
-        return self.request("session/resume", {"sessionId": sid}, timeout=60)
+        return self.request("session/resume", {"sessionId": sid, "cwd": WORKSPACE}, timeout=60)
 
     def prompt(self, sid, text):
         # Do not hold the HTTP request until the whole agent turn finishes.
         def run():
             try:
                 self.resume(sid)
-            except Exception:
-                pass
+            except Exception as e:
+                sys.stderr.write(f"resume failed: {e}\n")
             try:
                 self.request("session/prompt", {
                     "sessionId": sid,
@@ -219,7 +223,8 @@ def stt(wav_bytes: bytes) -> str:
     tmp.write_bytes(wav_bytes)
     try:
         p = subprocess.run([str(STT_PY), str(STT_SCRIPT), str(STT_MODEL), str(tmp)],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60)
         if p.returncode != 0:
             raise RuntimeError(p.stderr[-300:])
         return p.stdout.strip()
