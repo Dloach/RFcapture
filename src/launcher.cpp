@@ -6,6 +6,7 @@
 #include <esp_system.h>
 
 #include "cc1101.h"
+#include "ir_config.h"
 #include "nfc_app.h"
 #include "ook_tx.h"
 #include "polling_keyboard.h"
@@ -41,13 +42,29 @@ bool wifiStarted       = false;
 // The launcher list scrolls four rows at a time.  Keep the order here separate
 // from the App numeric values: BACKUP must stay 3 and KEYBOARD 4 because those
 // bytes are already in NVS appboot.
+// The launcher lists only the features that own a whole boot.  RF LAB lives
+// inside RF TOOLS now (src/app.cpp home menu) and reboots into kAppRfLab from
+// there, so the top level stays short enough to read without scrolling.
+//
+// IR TOOLS is compiled out of the shipping build (see platformio.ini and
+// ir_config.h); the sources stay in src/ and the entry comes back with
+// -DENABLE_IR_TOOLS=1.
 constexpr int kMenuVisible = 4;
-const char* const kMenuItems[] = {"RF TOOLS", "RF LAB", "NFC TOOLS", "KEYBOARD", "SSH",
-                                  "HARNESS", "FILES", "BADUSB", "USB DISK", "WEB FILES",
-                                  "RECORDER", "SETTINGS"};
+const char* const kMenuItems[] = {
+    "RF TOOLS", "NFC TOOLS", "KEYBOARD", "SSH", "HARNESS", "FILES",
+    "BADUSB", "USB DISK", "WEB FILES", "RECORDER", "DRUM", "SETTINGS",
+#if ENABLE_IR_TOOLS
+    "IR TOOLS",
+#endif
+};
 constexpr int kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
-const App kMenuApps[] = {kAppRf, kAppRfLab, kAppNfc, kAppKbd, kAppSsh, kAppHarness,
-                         kAppFiles, kAppBadUsb, kAppUsbDisk, kAppWeb, kAppRec, kAppSettings};
+const App kMenuApps[] = {
+    kAppRf, kAppNfc, kAppKbd, kAppSsh, kAppHarness, kAppFiles,
+    kAppBadUsb, kAppUsbDisk, kAppWeb, kAppRec, kAppDrum, kAppSettings,
+#if ENABLE_IR_TOOLS
+    kAppIr,
+#endif
+};
 
 char status[32] = {0};  // one-line result of the last quick action
 
@@ -261,7 +278,7 @@ constexpr int kBootBarH = 14;
 
 const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD", "SETTINGS",
                                  "SSH", "FILES", "BADUSB", "USB DISK", "RF LAB", "WEB FILES",
-                                 "RECORDER", "HARNESS"};
+                                 "RECORDER", "HARNESS", "IR TOOLS", "DRUM"};
 
 void drawBootBase(App app)
 {
@@ -270,7 +287,7 @@ void drawBootBase(App app)
     lcd.setTextColor(kText, kHead);
     lcd.drawString("CARDPUTER", 3, 2);
 
-    const char* name = kBootName[app <= kAppHarness ? app : 0];
+    const char* name = kBootName[app <= kAppDrum ? app : 0];
     lcd.setTextSize(2);
     lcd.setTextColor(kAccent, kBg);
     lcd.drawString(name, (lcd.width() - lcd.textWidth(name)) / 2, 52);
@@ -297,6 +314,12 @@ void drawBootProgress(int percent)
 
 App currentApp()
 {
+#if IR_BOOT_SELFTEST
+    // Bring-up build only (env:ir-selftest): every software reset lands in IR
+    // TOOLS so the feature can be exercised from a plain serial log, with no
+    // key presses on the device.
+    return kAppIr;
+#endif
     // A cold start always lands on the chooser.  The stored choice exists only so
     // that a *software* restart -- the NFC emulator re-arming itself, or a feature
     // handing control back -- lands where it intended.  Without this the device
@@ -311,7 +334,7 @@ App currentApp()
     if (!p.begin(kNs, true)) return kAppMenu;
     const uint8_t v = p.getUChar("app", kAppMenu);
     p.end();
-    return v <= kAppHarness ? static_cast<App>(v) : kAppMenu;
+    return v <= kAppDrum ? static_cast<App>(v) : kAppMenu;
 }
 
 void rebootInto(App app)

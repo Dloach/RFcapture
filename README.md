@@ -1,13 +1,19 @@
-# Cardputer ADV + CAP.CC1101：RF / NFC / 键盘 / WiFi / SSH / 文件 / BadUSB / U 盘
+# Cardputer ADV + CAP.CC1101：RF / IR / NFC / 键盘 / WiFi / SSH / 文件 / BadUSB / U 盘
 
-M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载键盘做：
+M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载红外 LED
+（G44）和板载键盘做：
 
 - **RF**：采集、保存并重发铁门 / 卷帘门 / 道闸等 OOK 遥控器（EV1527 / PT2262 固定码）；
+  RF LAB（频谱 / `.sub` / 生成 / 调制分析 / 编辑）从 **RF TOOLS 首页**进入；
+- **IR**（**未编入出货固件**，源码在 `src/ir_*`，`pio run -e cardputer-ir` 可编回）：
+  G44 发射红外（NEC / 三星 / RC5 / RC6 / 索尼 / 松下 / 格力空调），回放 Flipper `.ir`
+  遥控库；外接 38 kHz 模块后可学习新遥控器；详见 [docs/IR.md](docs/IR.md)；
 - **NFC**：读取 NFC-A 卡、保存 UID/ATQA/SAK，并把其中一张放回空中（模拟开门）；
 - **KEYBOARD**：USB 有线 HID 键盘，或 BLE 无线 HID 键盘（`Cardputer-KB`）；
-- **RF LAB**：频谱瀑布、`.sub` 导入导出、固定码生成/枚举、调制包络分析、信号编辑/重发/频偏；
+- **RF LAB**（RF TOOLS 首页第 4 项）：频谱瀑布、`.sub` 导入导出、固定码生成/枚举、调制包络分析、信号编辑/重发/频偏；
 - **WEB FILES**：Cardputer 开 HTTP 服务，手机/电脑浏览器管理 TF 卡；
 - **RECORDER**：板载麦克风录 16 kHz mono WAV 到 TF，可回放；
+- **DRUM**：8 轨 × 16 step 合成鼓机/音序器，可编辑、播放、调 BPM、单轨静音；
 - **SETTINGS**：WiFi 扫描/保存、OTA 无线烧录、TF 备份/恢复、亮度/超时/电池；
 - **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端；
 - **HARNESS**：Cardputer 直连 DeepSeek Harness；首页为会话列表（标题+预览、可滚动），`Fn+N` 新建、`Fn+V` 语音；
@@ -31,6 +37,14 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）和板载�
   - `READ CARDS`：扫描并入库（UID / ATQA / SAK / 类型）；
   - `CARD LIST`：选中 `ENTER` 模拟、`B` 绑定九宫格、`D` 删除、`N` 改名；
   - 模拟配方见 `docs/DEV-STATE.md` §14.2。
+- **IR TOOLS**（**已从出货固件移除，源码保留**，见 `src/ir_config.h` 与 `docs/IR.md`）
+  - 移除原因：发射链已验证（手机摄像头能看到 LED 亮），但空调本体始终没被触发，
+    协议变体无法在没有接收模块的情况下确认，所以先不占固件；
+  - 源码：`src/ir_app.* / ir_protocol.* / ir_tx.* / ir_rx.* / ir_store.* / ir_file.*`
+    全部保留，host 测试（251 项）照跑；
+  - 编回来：`pio run -e cardputer-ir -t upload`（launcher 会重新出现 IR TOOLS）；
+  - 内容：G44 红外发射（NEC / 三星 / RC5 / RC6 / 索尼 / 松下 / 格力空调）、
+    AIR CON 空调页、Flipper `.ir` 回放、外接模块学习、UNIVERSAL 电视键、MY CODES。
 - **SETTINGS → BACKUP / RESTORE**
   - 一次把 RF 永久信号、NFC 卡库、九宫格绑定写到 TF 卡；
   - `RESTORE FROM TF` 恢复三份数据（会先确认）。
@@ -127,6 +141,11 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 - KEYBOARD 模式页：`ENT` 进入选中模式、`esc` 回 launcher；
 - KEYBOARD 工作页：`Fn+BKSP` 回 KEYBOARD 菜单；`Fn+`` = Esc；`Opt` = Win。
 - launcher：`; .` 上下滚动十二项；`ENT` 进入；右侧九宫格照旧。
+- DRUM：`; .` 选 step、`, /` 选轨、`ENT` 切换 hit、`P` 播放/停止、`=`/`-` 调 BPM、`M` 静音当前轨、`esc` 返回。
+- RF TOOLS 首页：`CAPTURE / SEND / SCAN RF / RF LAB` 四项，`ENT` 进入。
+- IR（仅 `env:cardputer-ir` 固件）：`; .` 选条目，`ENT` 发送/进入，`esc` 返回；AIR CON `; .` 选行、`, /` 改值、`ENT` 发；MY CODES `D` 连按两次删除、
+  `S` 导出；SD REMOTES `ENT` 进目录、打开 `.ir` 后 `ENT` 发、`S` 存码库；
+  LEARN 抓到后 `ENT` 回放、`S` 保存、`D` 丢弃重听。
 - HARNESS：首页 `; .` 选会话，`ENT` 打开，`Fn+N` 新建，`Fn+V` 语音；聊天页 `Fn+S` 回列表。
 - SETTINGS / WIFI：`S` 扫描，`ENT` 选择，密码页 `ENT` 连接、`BKSP` 删除、
   `Fn+BKSP` 取消；`TEST CONNECTION` 验证外网 TCP。
@@ -137,12 +156,19 @@ pio run -e cardputer-adv -t upload --upload-port /dev/cu.usbmodem101
 
 ```text
 cardputer/
-├── platformio.ini              env: cardputer-adv / diag-off / example
+├── platformio.ini              env: cardputer-adv / diag-off / example / ir-selftest
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
 │   ├── launcher.*              launcher 十二功能（滚动）+ 九宫格
+│   ├── drum_app.*              8 轨 16-step 合成鼓机
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
+│   ├── ir_app.*                IR 首页 / 码库 / TF 遥控 / 学习 / 通用 / 设置
+│   ├── ir_protocol.*           红外协议引擎（编码 + 解码，纯 C++，可 host 测试）
+│   ├── ir_tx.*                 RMT 38 kHz 载波发送（G44）
+│   ├── ir_rx.*                 RMT 接收（外接模块，G1/G2）
+│   ├── ir_store.*              红外码库（NVS，解析码 48 条）
+│   ├── ir_file.*               Flipper `.ir` 解析 / 生成
 │   ├── nfc_app.*               NFC 读卡 / 列表 / 模拟
 │   ├── nfc_cards.*             NFC 卡库（SPIFFS + TF 备份）
 │   ├── kbd_app.*               USB / BLE 键盘 + 映射页
@@ -176,10 +202,12 @@ cardputer/
     ├── PLAN-keyboard-next.md   键盘功能的执行计划
     ├── PLAN-wifi-ssh.md        WiFi Settings + SSH 客户端开发计划
     ├── SSH.md                  SSH profile / host key / 终端说明
+    ├── IR.md                   红外发送 / 学习 / Flipper .ir 兼容性
     ├── OTA.md                  无线烧录步骤与故障排查
     ├── LOCAL.md                FILES / BADUSB / 显示与电源
     ├── RF-LAB.md               频谱 / .sub / 生成 / 调制分析 / 编辑
     ├── WEB-REC.md              Web 文件管理 / 录音
+    ├── DRUM.md                 8 轨 16-step 合成鼓机
     ├── HARNESS.md              DSH 直连 bridge 与 Cardputer 客户端
     ├── THIRD-PARTY.md          第三方组件与 LGPL 注意事项
     └── RESEARCH-keyboard.md    键盘调研
@@ -195,7 +223,7 @@ host key 变更提示、终端 ANSI 补全和滚动历史；详见
 ## 测试
 
 host 测试覆盖 EV1527 / PT2262 解码、基准时间估算、波形质量分、九宫格 key、
-同码波形替换策略、永久列表撕裂恢复：
+同码波形替换策略、永久列表撕裂恢复，以及红外协议引擎和 Flipper `.ir` 解析：
 
 ```bash
 ./tests/host/run.sh             # macOS / Linux
@@ -203,8 +231,8 @@ host 测试覆盖 EV1527 / PT2262 解码、基准时间估算、波形质量分�
 ```
 
 需要一个本机 C++17 编译器（g++ / clang++ / MSVC）。脚本也认 `tools/zig/zig.exe`
-和 PATH 上的 `zig`。当前为 **57 项全过**（43 解码/绑定/存储 + 14 SSH 终端）；
-PlatformIO 的 Xtensa 交叉编译器不能跑这些测试。
+和 PATH 上的 `zig`。当前为 **458 项全过**（43 解码/绑定/存储 + 14 SSH 终端 +
+251 红外编解码（含格力真机抓包）+ 150 `.ir` 解析）；PlatformIO 的 Xtensa 交叉编译器不能跑这些测试。
 
 ## 合规
 

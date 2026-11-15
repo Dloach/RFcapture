@@ -38,6 +38,8 @@ enum App : uint8_t {
     kAppWeb      = 11, // WiFi HTTP file manager
     kAppRec      = 12, // microphone WAV recorder
     kAppHarness  = 13, // DSH LAN bridge client
+    kAppIr       = 14, // infrared send / learn (G44 LED + external receiver)
+    kAppDrum     = 15, // 16-step drum machine / sequencer
 };
 
 /// Which app this boot belongs to (from NVS).

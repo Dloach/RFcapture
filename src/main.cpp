@@ -19,7 +19,12 @@
 #include "backup_app.h"
 #include "badusb_app.h"
 #include "files_app.h"
+#include "drum_app.h"
 #include "harness_app.h"
+#include "ir_config.h"
+#if ENABLE_IR_TOOLS
+#include "ir_app.h"
+#endif
 #include "kbd_app.h"
 #include "launcher.h"
 #include "nfc_app.h"
@@ -37,7 +42,13 @@
 
 namespace {
 
-enum class Running : uint8_t { kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb, kRec, kHarness };
+enum class Running : uint8_t {
+    kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb,
+    kRec, kHarness, kDrum,
+#if ENABLE_IR_TOOLS
+    kIr,
+#endif
+};
 
 USBCDC usbSerial(0);
 Running g_running = Running::kMenu;
@@ -153,9 +164,21 @@ void setup()
             recapp::setup();
             break;
 
+#if ENABLE_IR_TOOLS
+        case launcher::kAppIr:
+            g_running = Running::kIr;
+            irapp::setup();
+            break;
+#endif
+
         case launcher::kAppHarness:
             g_running = Running::kHarness;
             harnessapp::setup();
+            break;
+
+        case launcher::kAppDrum:
+            g_running = Running::kDrum;
+            drumapp::setup();
             break;
 
         default:
@@ -216,8 +239,16 @@ void loop()
         case Running::kRec:
             recapp::loop();
             break;
+#if ENABLE_IR_TOOLS
+        case Running::kIr:
+            irapp::loop();
+            break;
+#endif
         case Running::kHarness:
             harnessapp::loop();
+            break;
+        case Running::kDrum:
+            drumapp::loop();
             break;
         default:
             launcher::menuLoop();
