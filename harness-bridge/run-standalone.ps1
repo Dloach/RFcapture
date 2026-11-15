@@ -15,6 +15,9 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
     Where-Object { $_.CommandLine -match 'dsh-standalone.*bin\.js' -and $_.CommandLine -match 'cardputer' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
-Start-Process -FilePath $python -ArgumentList @($script) -WorkingDirectory $root -NoNewWindow
+Start-Process -FilePath $python -ArgumentList @($script) -WorkingDirectory $root `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput (Join-Path $root "docs\standalone.out") `
+    -RedirectStandardError (Join-Path $root "docs\standalone.err")
 Write-Host "Bridge starting on http://192.168.0.88:9100/" -ForegroundColor Cyan
 Write-Host "Health: http://192.168.0.88:9100/cardputer/health"

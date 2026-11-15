@@ -34,3 +34,4 @@ docs/ota-*.log
 docs/flash-*.log
 docs/rec-serial.log
 docs/standalone.*
+harness-bridge/__pycache__/
