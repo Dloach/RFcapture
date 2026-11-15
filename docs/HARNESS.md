@@ -50,16 +50,24 @@ POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
 
 ## Cardputer app
 
-launcher → **HARNESS**.
+launcher → **HARNESS** 首先进入 **Session 列表**（不是默认聊天）：
 
-- `Fn+C`: bridge host/token config;
-- `Fn+S`: Session list (Enter open, N new);
-- `Fn+V`: 2 s voice note → `/stt` → text inserted into input;
-- type ASCII, `ENT` send;
-- `Fn+;` / `Fn+.` scroll chat;
-- `esc` back.
+- 每项显示首条用户内容作为标题，下面显示短 ID + 最后一条消息预览；
+- `;` / `.` 上下移动，列表自动滚动，光标不会跑出屏幕；
+- `ENT` 打开当前高亮 Session；
+- `Fn+N` 新建会话并直接进入；
+- `Fn+C`: bridge host/token 配置；
+- `esc` 从列表返回 launcher。
 
-NVS namespace `harness`: `host`, `token`, `session`.
+聊天页：
+
+- `Fn+S` 返回 Session 列表；
+- `Fn+V`: 2 s 语音 → `/stt` → 填入输入框；
+- 输入英文，`ENT` 发送；
+- `Fn+;` / `Fn+.` 滚动聊天；
+- `esc` 返回 Session 列表。
+
+NVS namespace `harness`: `host`, `token`, `session`。
 
 ## Windows 端看不到会话
 

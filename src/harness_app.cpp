@@ -28,11 +28,11 @@ constexpr uint16_t kWarn   = 0xF800;
 constexpr uint16_t kBar    = 0x2104;
 constexpr uint16_t kHead   = 0x18E3;
 constexpr uint16_t kPort   = 9100;
-constexpr int kChatLines   = 8;
+constexpr int kSessionRows = 4;
 
 auto& lcd = M5Cardputer.Display;
-enum class Screen : uint8_t { kChat, kSessions, kConfig };
-Screen screen = Screen::kChat;
+enum class Screen : uint8_t { kSessions, kChat, kConfig };
+Screen screen = Screen::kSessions;
 bool dirty = true;
 bool wifiOk = false;
 bool bridgeOk = false;
@@ -50,12 +50,19 @@ struct Msg {
     String role;
     String text;
 };
+struct SessionItem {
+    String id;
+    String title;
+    String preview;
+    String cwd;
+    long updatedAt = 0;
+};
 std::vector<Msg> msgs;
 std::vector<String> chatLines;
-std::vector<String> sessionIds;
+std::vector<SessionItem> sessions;
 int lineScroll = 0;
-int msgScroll = 0;
 int sessSel = 0;
+int sessTop = 0;
 int configField = 0;
 String configEdit;
 std::vector<char> prevWord;
@@ -134,7 +141,13 @@ bool requestJson(const String& path, JsonDocument& doc, bool post = false, const
     const String payload = http.getString();
     http.end();
     if (code < 200 || code >= 300) {
-        lastError = String("HTTP ") + code;
+        if (payload.indexOf("already owned") >= 0) {
+            lastError = "CHAT OPEN IN DSH";
+        } else if (payload.indexOf("unknown session") >= 0) {
+            lastError = "NO SESSION";
+        } else {
+            lastError = String("HTTP ") + code;
+        }
         return false;
     }
     DeserializationError err = deserializeJson(doc, payload);
@@ -149,11 +162,41 @@ bool fetchSessions()
 {
     JsonDocument doc;
     if (!requestJson("/cardputer/sessions", doc)) return false;
-    sessionIds.clear();
+    sessions.clear();
     for (JsonObject item : doc["sessions"].as<JsonArray>()) {
-        sessionIds.push_back(item["sessionId"].as<String>());
+        SessionItem s;
+        s.id = item["sessionId"].as<String>();
+        s.title = item["title"].as<String>();
+        s.preview = item["preview"].as<String>();
+        s.cwd = item["cwd"].as<String>();
+        s.updatedAt = item["updatedAt"] | 0;
+        if (s.title.isEmpty()) s.title = "New session";
+        if (s.preview.isEmpty()) s.preview = "No messages yet";
+        if (!s.id.isEmpty()) sessions.push_back(s);
     }
     return true;
+}
+
+int sessionIndex(const String& id)
+{
+    for (int i = 0; i < (int)sessions.size(); ++i) {
+        if (sessions[i].id == id) return i;
+    }
+    return -1;
+}
+
+void keepSelectionVisible()
+{
+    if (sessSel < sessTop) sessTop = sessSel;
+    if (sessSel >= sessTop + kSessionRows) sessTop = sessSel - kSessionRows + 1;
+    if (sessTop < 0) sessTop = 0;
+    const int maxTop = std::max(0, (int)sessions.size() - kSessionRows);
+    if (sessTop > maxTop) sessTop = maxTop;
+}
+
+String shortSession(const String& id)
+{
+    return id.substring(0, 8);
 }
 
 bool createSession()
@@ -352,8 +395,9 @@ void renderChat()
     lcd.setTextColor(bridgeOk ? kOk : kWarn, kBg);
     lcd.drawString(bridgeOk ? status : (lastError.isEmpty() ? status : lastError), 3, 15);
     lcd.setTextColor(kDim, kBg);
-    lcd.drawRightString(sessionId.isEmpty() ? "no session" : sessionId.substring(0, 8),
-                        lcd.width() - 3, 15);
+    const int si = sessionIndex(sessionId);
+    const String label = si >= 0 ? sessions[si].title : (sessionId.isEmpty() ? "no session" : shortSession(sessionId));
+    lcd.drawRightString(label.substring(0, 20), lcd.width() - 3, 15);
 
     lcd.setFont(&lgfx::fonts::efontCN_12);
     lcd.setTextColor(kText, kBg);
@@ -384,21 +428,29 @@ void renderSessions()
     lcd.fillScreen(kBg);
     header();
     lcd.setTextFont(1);
+    lcd.setTextColor(bridgeOk ? kOk : kWarn, kBg);
+    lcd.drawString(bridgeOk ? status : (lastError.isEmpty() ? status : lastError), 3, 15);
     lcd.setTextColor(kDim, kBg);
-    lcd.drawString("SESSIONS", 3, 16);
-    if (sessionIds.empty()) {
-        lcd.drawString("none  N new", 3, 32);
+    lcd.drawRightString(String((int)sessions.size()) + " chats", lcd.width() - 3, 15);
+    if (sessions.empty()) {
+        lcd.setTextColor(kText, kBg);
+        lcd.drawString("No sessions. Fn+N new", 3, 34);
     }
-    const int first = msgScroll;
-    for (int r = 0; r < 7; ++r) {
-        const int idx = first + r;
-        if (idx >= (int)sessionIds.size()) break;
-        const int y = 28 + r * 12;
-        if (idx == sessSel) lcd.fillRect(0, y - 2, lcd.width(), 12, kBar);
-        lcd.setTextColor(idx == sessSel ? kAccent : kText, idx == sessSel ? kBar : kBg);
-        lcd.drawString(sessionIds[idx], 4, y);
+    for (int r = 0; r < kSessionRows; ++r) {
+        const int idx = sessTop + r;
+        if (idx >= (int)sessions.size()) break;
+        const int y = 27 + r * 22;
+        const bool sel = idx == sessSel;
+        if (sel) lcd.fillRect(0, y - 2, lcd.width(), 22, kBar);
+        lcd.setTextColor(sel ? kAccent : kText, sel ? kBar : kBg);
+        lcd.setFont(&lgfx::fonts::efontCN_12);
+        lcd.drawString(sessions[idx].title.substring(0, 20), 4, y);
+        lcd.setTextColor(sel ? kText : kDim, sel ? kBar : kBg);
+        String meta = shortSession(sessions[idx].id) + "  " + sessions[idx].preview.substring(0, 30);
+        lcd.drawString(meta, 4, y + 11);
     }
-    static const Hint h[] = {{"ENT", "open"}, {"N", "new"}, {"esc", "back"}};
+    lcd.setTextFont(1);
+    static const Hint h[] = {{"FnN", "new"}, {"ENT", "open"}, {"esc", "back"}};
     hints(h, 3);
 }
 
@@ -431,12 +483,47 @@ void render()
     dirty = false;
 }
 
-void startChat()
+void openChatIndex(int idx)
+{
+    if (idx < 0 || idx >= (int)sessions.size()) return;
+    sessionId = sessions[idx].id;
+    sessSel = idx;
+    savePrefs();
+    fetchMessages();
+    rebuildChat();
+    lineScroll = 0;
+    screen = Screen::kChat;
+    status = "CONNECTED";
+    dirty = true;
+}
+
+void createAndOpen()
+{
+    status = "NEW CHAT";
+    if (!createSession()) {
+        status = "NEW FAILED";
+        lastError = "create failed";
+        dirty = true;
+        return;
+    }
+    if (!fetchSessions()) {
+        status = "LIST FAILED";
+        dirty = true;
+        return;
+    }
+    const int idx = sessionIndex(sessionId);
+    sessSel = idx >= 0 ? idx : 0;
+    keepSelectionVisible();
+    openChatIndex(sessSel);
+}
+
+void loadSessionList()
 {
     status = "CONNECTING";
     if (!wifiOk) connectWifi();
     if (!wifiOk) {
         bridgeOk = false;
+        status = "NO WIFI";
         dirty = true;
         return;
     }
@@ -447,20 +534,15 @@ void startChat()
         return;
     }
     bridgeOk = true;
-    if (sessionId.isEmpty() || std::find(sessionIds.begin(), sessionIds.end(), sessionId) == sessionIds.end()) {
+    const int idx = sessionIndex(sessionId);
+    if (idx >= 0) {
+        sessSel = idx;
+    } else {
+        sessSel = 0;
         sessionId.clear();
-        for (const auto& id : sessionIds) {
-            if (!id.isEmpty()) {
-                sessionId = id;
-                break;
-            }
-        }
-        if (sessionId.isEmpty()) createSession();
-        savePrefs();
     }
-    fetchMessages();
-    rebuildChat();
-    lineScroll = 0;
+    keepSelectionVisible();
+    screen = Screen::kSessions;
     status = "CONNECTED";
     dirty = true;
 }
@@ -468,11 +550,15 @@ void startChat()
 void sendInput()
 {
     if (input.isEmpty() || !bridgeOk) return;
+    if (sessionId.isEmpty()) {
+        status = "SELECT CHAT";
+        dirty = true;
+        return;
+    }
     busy = true;
     status = "SENDING";
     if (!sendPrompt(input)) {
-        status = "SEND FAILED";
-        lastError = "prompt rejected";
+        status = lastError.isEmpty() ? "SEND FAILED" : lastError;
         busy = false;
         dirty = true;
         return;
@@ -520,10 +606,12 @@ void handleChat()
             continue;
         }
         if (fn && (c == 's' || c == 'S')) {
+            const int idx = sessionIndex(sessionId);
+            sessSel = idx >= 0 ? idx : 0;
+            keepSelectionVisible();
             screen = Screen::kSessions;
-            sessSel = 0;
-            msgScroll = 0;
-            configEdit.clear();
+            prevWord.clear();
+            prevEnter = false;
             dirty = true;
             continue;
         }
@@ -561,7 +649,13 @@ void handleChat()
     if (!ks.enter) prevEnter = false;
 
     if (M5Cardputer.Keyboard.isKeyPressed('`') && !prevEsc) {
-        launcher::rebootInto(launcher::kAppMenu);
+        const int idx = sessionIndex(sessionId);
+        sessSel = idx >= 0 ? idx : 0;
+        keepSelectionVisible();
+        screen = Screen::kSessions;
+        prevWord.clear();
+        prevEnter = false;
+        dirty = true;
     }
     prevEsc = M5Cardputer.Keyboard.isKeyPressed('`');
 }
@@ -569,40 +663,47 @@ void handleChat()
 void handleSessions()
 {
     const auto ks = M5Cardputer.Keyboard.keysState();
-    if (ks.enter) {
-        if (sessSel >= 0 && sessSel < (int)sessionIds.size()) {
-            sessionId = sessionIds[sessSel];
-            savePrefs();
-            fetchMessages();
-            rebuildChat();
-            lineScroll = 0;
-            screen = Screen::kChat;
+    const bool fn = ks.fn;
+    for (char c : ks.word) {
+        if (c < 32 || c >= 127) continue;
+        bool already = false;
+        for (char p : prevWord) if (p == c) { already = true; break; }
+        if (already) continue;
+        if (c == 'n' || c == 'N') {
+            createAndOpen();
+            prevWord.assign(ks.word.begin(), ks.word.end());
+            return;
+        }
+        if (fn && (c == 'c' || c == 'C')) {
+            screen = Screen::kConfig;
+            configField = 0;
+            configEdit = host;
+            dirty = true;
+            prevWord.assign(ks.word.begin(), ks.word.end());
+            return;
+        }
+        if (c == ';' && sessSel > 0) {
+            --sessSel;
+            keepSelectionVisible();
+            dirty = true;
+        } else if (c == '.' && sessSel + 1 < (int)sessions.size()) {
+            ++sessSel;
+            keepSelectionVisible();
             dirty = true;
         }
-        return;
     }
-    for (char c : ks.word) {
-        if (c == 'N' || c == 'n') {
-            if (createSession()) {
-                fetchSessions();
-                sessSel = 0;
-            }
-        }
+    prevWord.assign(ks.word.begin(), ks.word.end());
+
+    if (ks.enter && !prevEnter) {
+        openChatIndex(sessSel);
+        prevEnter = true;
     }
-    if (ks.fn) {
-        // reserved
-    } else if (M5Cardputer.Keyboard.isKeyPressed(';') && sessSel > 0) {
-        --sessSel;
-        dirty = true;
-    } else if (M5Cardputer.Keyboard.isKeyPressed('.') &&
-               sessSel + 1 < (int)sessionIds.size()) {
-        ++sessSel;
-        dirty = true;
+    if (!ks.enter) prevEnter = false;
+
+    if (M5Cardputer.Keyboard.isKeyPressed('`') && !prevEsc) {
+        launcher::rebootInto(launcher::kAppMenu);
     }
-    if (M5Cardputer.Keyboard.isKeyPressed('`')) {
-        screen = Screen::kChat;
-        dirty = true;
-    }
+    prevEsc = M5Cardputer.Keyboard.isKeyPressed('`');
 }
 
 void handleConfig()
@@ -617,7 +718,7 @@ void handleConfig()
             configField ^= 1;
             configEdit = configField == 0 ? host : token;
         } else if (c == '`') {
-            screen = Screen::kChat;
+            screen = Screen::kSessions;
             dirty = true;
         } else {
             configEdit += c;
@@ -633,10 +734,10 @@ void handleConfig()
         if (configField == 0) host = configEdit;
         else token = configEdit;
         savePrefs();
-        screen = Screen::kChat;
+        screen = Screen::kSessions;
         bridgeOk = false;
         status = "RECONNECT";
-        startChat();
+        loadSessionList();
     }
 }
 
@@ -665,8 +766,8 @@ void setup()
     lcd.fillScreen(kBg);
 
     loadPrefs();
-    screen = Screen::kChat;
-    startChat();
+    screen = Screen::kSessions;
+    loadSessionList();
     render();
 }
 
