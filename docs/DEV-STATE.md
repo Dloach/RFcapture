@@ -6,6 +6,10 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 ## 0. 当前真相（先读这一节）
 
+> **调试方法（强制）：** 定位任何硬件/固件问题前，先读 [`docs/FIRMWARE-DEBUG.md`](FIRMWARE-DEBUG.md)。
+> 核心：测量而非猜测、证据设备端自动落盘且无需用户操作即可读回、继承的诊断必须先验证。
+> HARNESS 语音卡顿就是靠这套方法定位的（WS 小写阻塞，非「I2S 时钟慢 16 倍」）。
+
 | 主题 | 当前结论 |
 |---|---|
 | 功能结构 | launcher 十一功能 **RF TOOLS / RF LAB / NFC TOOLS / KEYBOARD / SSH / FILES / BADUSB / USB DISK / WEB FILES / RECORDER / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格 |
