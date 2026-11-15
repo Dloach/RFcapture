@@ -4,6 +4,7 @@
 #include <utility/Adafruit_TCA8418/Adafruit_TCA8418.h>
 
 #include <algorithm>
+#include <deque>
 #include <memory>
 
 #include "rf_config.h"
@@ -21,6 +22,29 @@ inline uint32_t& kbdLastEventMs()
 {
     static uint32_t value = 0;
     return value;
+}
+
+// Physical press edges for apps that need exact text entry (HARNESS).  The
+// stock KeysState.word is a full snapshot, so using a snapshot diff turns
+// Shift/Aa into phantom characters and repeats held Backspace presses.
+inline std::deque<Point2D_t>& kbdPressQueue()
+{
+    static std::deque<Point2D_t> queue;
+    return queue;
+}
+
+inline bool kbdPopPress(Point2D_t& point)
+{
+    auto& q = kbdPressQueue();
+    if (q.empty()) return false;
+    point = q.front();
+    q.pop_front();
+    return true;
+}
+
+inline void kbdClearPresses()
+{
+    kbdPressQueue().clear();
 }
 
 // Polling replacement for M5Cardputer's bundled TCA8418 keyboard reader.
@@ -110,7 +134,12 @@ private:
 
         auto it = std::find(_key_list.begin(), _key_list.end(), point);
         if (e.state) {
-            if (it == _key_list.end()) _key_list.push_back(point);
+            if (it == _key_list.end()) {
+                _key_list.push_back(point);
+                auto& q = kbdPressQueue();
+                q.push_back(point);
+                if (q.size() > 64) q.pop_front();
+            }
         } else if (it != _key_list.end()) {
             _key_list.erase(it);
         }

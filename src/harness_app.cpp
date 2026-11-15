@@ -65,9 +65,6 @@ int sessSel = 0;
 int sessTop = 0;
 int configField = 0;
 String configEdit;
-std::vector<char> prevWord;
-bool prevEnter = false;
-bool prevEsc = false;
 
 struct Hint {
     const char* key;
@@ -418,8 +415,8 @@ void renderChat()
     while (lcd.textWidth(shown) > lcd.width() - 6 && shown.length() > 2) shown.remove(0, 1);
     lcd.drawString(shown, 3, 105);
     lcd.setTextFont(1);
-    static const Hint h[] = {{"ENT", "send"}, {"FnV", "voice"}, {"esc", "back"}};
-    hints(h, 3);
+    static const Hint h[] = {{"ENT", "send"}, {"FnV", "voice"}, {"Fn;.", "scroll"}, {"esc", "list"}};
+    hints(h, 4);
     dirty = false;
 }
 
@@ -450,8 +447,8 @@ void renderSessions()
         lcd.drawString(meta, 4, y + 11);
     }
     lcd.setTextFont(1);
-    static const Hint h[] = {{"FnN", "new"}, {"ENT", "open"}, {"esc", "back"}};
-    hints(h, 3);
+    static const Hint h[] = {{"FnN", "new"}, {"ENT", "open"}, {";.", "move"}, {"esc", "back"}};
+    hints(h, 4);
 }
 
 void renderConfig()
@@ -586,17 +583,114 @@ void poll()
     }
 }
 
-void handleChat()
+void deleteLastUtf8(String& s)
 {
+    if (s.isEmpty()) return;
+    int i = (int)s.length() - 1;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;
+    s.remove(i);
+}
+
+void scrollChat(int delta)
+{
+    const int maxScroll = std::max(0, (int)chatLines.size() - 6);
+    lineScroll += delta;
+    if (lineScroll < 0) lineScroll = 0;
+    if (lineScroll > maxScroll) lineScroll = maxScroll;
+    dirty = true;
+}
+
+void handlePress(Point2D_t point)
+{
+    char c = (char)M5Cardputer.Keyboard.getKey(point);
     const auto ks = M5Cardputer.Keyboard.keysState();
     const bool fn = ks.fn;
 
-    for (char c : ks.word) {
-        if (c < 32 || c >= 127) continue;
-        bool already = false;
-        for (char p : prevWord) if (p == c) { already = true; break; }
-        if (already) continue;
-        if (fn && (c == 'v' || c == 'V')) {
+    if (screen == Screen::kSessions) {
+        if (c == KEY_ENTER) {
+            openChatIndex(sessSel);
+            return;
+        }
+        if (c == 'n' || c == 'N') {
+            createAndOpen();
+            return;
+        }
+        if (fn && (c == 'c' || c == 'C')) {
+            screen = Screen::kConfig;
+            configField = 0;
+            configEdit = host;
+            dirty = true;
+            return;
+        }
+        if (c == ';' && sessSel > 0) {
+            --sessSel;
+            keepSelectionVisible();
+            dirty = true;
+        } else if (c == '.' && sessSel + 1 < (int)sessions.size()) {
+            ++sessSel;
+            keepSelectionVisible();
+            dirty = true;
+        } else if (c == '`') {
+            launcher::rebootInto(launcher::kAppMenu);
+        }
+        return;
+    }
+
+    if (screen == Screen::kConfig) {
+        if (c == KEY_ENTER) {
+            if (configField == 0) host = configEdit;
+            else token = configEdit;
+            savePrefs();
+            bridgeOk = false;
+            status = "RECONNECT";
+            loadSessionList();
+            return;
+        }
+        if (c == KEY_BACKSPACE) {
+            deleteLastUtf8(configEdit);
+            dirty = true;
+            return;
+        }
+        if (c == '`') {
+            screen = Screen::kSessions;
+            dirty = true;
+            return;
+        }
+        if (fn && (c == ';' || c == '.')) {
+            configField ^= 1;
+            configEdit = configField == 0 ? host : token;
+            dirty = true;
+            return;
+        }
+        if (c >= 32 && c < 127) {
+            configEdit += c;
+            dirty = true;
+        }
+        return;
+    }
+
+    // Chat: one physical press produces at most one action.  Shift/Aa is a
+    // modifier, so it never becomes a phantom character.
+    if (c == KEY_ENTER) {
+        sendInput();
+        return;
+    }
+    if (c == KEY_BACKSPACE) {
+        deleteLastUtf8(input);
+        dirty = true;
+        return;
+    }
+    if (c == '`') {
+        fetchSessions();
+        const int idx = sessionIndex(sessionId);
+        sessSel = idx >= 0 ? idx : 0;
+        keepSelectionVisible();
+        screen = Screen::kSessions;
+        dirty = true;
+        return;
+    }
+    if (fn) {
+        if (c == 'v' || c == 'V') {
             status = "LISTEN 2s";
             dirty = true;
             render();
@@ -608,143 +702,30 @@ void handleChat()
                 status = lastError.isEmpty() ? "VOICE FAILED" : lastError;
             }
             dirty = true;
-            continue;
-        }
-        if (fn && (c == 's' || c == 'S')) {
+        } else if (c == 's' || c == 'S') {
             fetchSessions();
             const int idx = sessionIndex(sessionId);
             sessSel = idx >= 0 ? idx : 0;
             keepSelectionVisible();
             screen = Screen::kSessions;
-            prevWord.clear();
-            prevEnter = false;
             dirty = true;
-            continue;
-        }
-        if (fn && (c == 'c' || c == 'C')) {
+        } else if (c == 'c' || c == 'C') {
             screen = Screen::kConfig;
             configField = 0;
             configEdit = host;
             dirty = true;
-            continue;
+        } else if (c == 'n' || c == 'N') {
+            createAndOpen();
+        } else if (c == ';' || c == ',') {
+            scrollChat(3);
+        } else if (c == '.' || c == '/') {
+            scrollChat(-3);
         }
-        if (c == ';' || c == '.') {
-            if (fn) {
-                lineScroll += (c == ';') ? 1 : -1;
-                if (lineScroll < 0) lineScroll = 0;
-                dirty = true;
-            } else {
-                input += c;
-                dirty = true;
-            }
-            continue;
-        }
+        return;
+    }
+    if (c >= 32 && c < 127) {
         input += c;
         dirty = true;
-    }
-    prevWord.assign(ks.word.begin(), ks.word.end());
-
-    if (ks.del && input.length() > 0) {
-        input.remove(input.length() - 1);
-        dirty = true;
-    }
-    if (ks.enter && !prevEnter) {
-        sendInput();
-        prevEnter = true;
-    }
-    if (!ks.enter) prevEnter = false;
-
-    if (M5Cardputer.Keyboard.isKeyPressed('`') && !prevEsc) {
-        fetchSessions();
-        const int idx = sessionIndex(sessionId);
-        sessSel = idx >= 0 ? idx : 0;
-        keepSelectionVisible();
-        screen = Screen::kSessions;
-        prevWord.clear();
-        prevEnter = false;
-        dirty = true;
-    }
-    prevEsc = M5Cardputer.Keyboard.isKeyPressed('`');
-}
-
-void handleSessions()
-{
-    const auto ks = M5Cardputer.Keyboard.keysState();
-    const bool fn = ks.fn;
-    for (char c : ks.word) {
-        if (c < 32 || c >= 127) continue;
-        bool already = false;
-        for (char p : prevWord) if (p == c) { already = true; break; }
-        if (already) continue;
-        if (c == 'n' || c == 'N') {
-            createAndOpen();
-            prevWord.assign(ks.word.begin(), ks.word.end());
-            return;
-        }
-        if (fn && (c == 'c' || c == 'C')) {
-            screen = Screen::kConfig;
-            configField = 0;
-            configEdit = host;
-            dirty = true;
-            prevWord.assign(ks.word.begin(), ks.word.end());
-            return;
-        }
-        if (c == ';' && sessSel > 0) {
-            --sessSel;
-            keepSelectionVisible();
-            dirty = true;
-        } else if (c == '.' && sessSel + 1 < (int)sessions.size()) {
-            ++sessSel;
-            keepSelectionVisible();
-            dirty = true;
-        }
-    }
-    prevWord.assign(ks.word.begin(), ks.word.end());
-
-    if (ks.enter && !prevEnter) {
-        openChatIndex(sessSel);
-        prevEnter = true;
-    }
-    if (!ks.enter) prevEnter = false;
-
-    if (M5Cardputer.Keyboard.isKeyPressed('`') && !prevEsc) {
-        launcher::rebootInto(launcher::kAppMenu);
-    }
-    prevEsc = M5Cardputer.Keyboard.isKeyPressed('`');
-}
-
-void handleConfig()
-{
-    const auto ks = M5Cardputer.Keyboard.keysState();
-    for (char c : ks.word) {
-        if (c < 32 || c >= 127) continue;
-        bool already = false;
-        for (char p : prevWord) if (p == c) { already = true; break; }
-        if (already) continue;
-        if (ks.fn && (c == ';' || c == '.')) {
-            configField ^= 1;
-            configEdit = configField == 0 ? host : token;
-        } else if (c == '`') {
-            screen = Screen::kSessions;
-            dirty = true;
-        } else {
-            configEdit += c;
-        }
-        dirty = true;
-    }
-    prevWord.assign(ks.word.begin(), ks.word.end());
-    if (ks.del && !configEdit.isEmpty()) {
-        configEdit.remove(configEdit.length() - 1);
-        dirty = true;
-    }
-    if (ks.enter) {
-        if (configField == 0) host = configEdit;
-        else token = configEdit;
-        savePrefs();
-        screen = Screen::kSessions;
-        bridgeOk = false;
-        status = "RECONNECT";
-        loadSessionList();
     }
 }
 
@@ -752,7 +733,7 @@ void pollIfNeeded()
 {
     static uint32_t last = 0;
     if (screen != Screen::kChat) return;
-    if (millis() - last < 1500) return;
+    if (millis() - last < 2500) return;
     last = millis();
     poll();
 }
@@ -766,6 +747,7 @@ void setup()
     Serial.begin(115200);
     detachInterrupt(digitalPinToInterrupt(RF_KBD_INT));
     M5Cardputer.Keyboard.begin(std::unique_ptr<KeyboardReader>(new PollingKeyboardReader()));
+    kbdClearPresses();
     lcd.setRotation(rfcfg::screenRotation);
     lcd.setTextFont(1);
     lcd.setTextSize(1);
@@ -781,18 +763,9 @@ void setup()
 void loop()
 {
     M5Cardputer.update();
-    switch (screen) {
-        case Screen::kChat:
-            handleChat();
-            pollIfNeeded();
-            break;
-        case Screen::kSessions:
-            handleSessions();
-            break;
-        case Screen::kConfig:
-            handleConfig();
-            break;
-    }
+    Point2D_t point;
+    while (kbdPopPress(point)) handlePress(point);
+    pollIfNeeded();
     if (dirty) render();
     delay(5);
 }
