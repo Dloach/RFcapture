@@ -23,6 +23,8 @@ $termOut = Join-Path $root "tests\host\test_ssh_terminal.exe"
 $termSources = @("tests\host\test_ssh_terminal.cpp", "src\ssh_terminal.cpp")
 $irOut = Join-Path $root "tests\host\test_ir.exe"
 $irSources = @("tests\host\test_ir.cpp", "src\ir_protocol.cpp")
+$atomicOut = Join-Path $root "tests\host\test_atomic_store.exe"
+$atomicSources = @("tests\host\test_atomic_store.cpp")
 $irFileOut = Join-Path $root "tests\host\test_ir_file.exe"
 $irFileSources = @("tests\host\test_ir_file.cpp", "src\ir_file.cpp")
 
@@ -130,6 +132,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "Flipper .ir test build failed"
 }
 & $irFileOut
+if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+
+# The store-rotation helper is header-only: this test drives it with a fake file
+# system that fails on demand, so no firmware source is linked in.
+$atomicBuildArgs = @("-std=c++17", "-Wall", "-Wextra", "-I", "src", "-o", $atomicOut) + $atomicSources
+if ($isZig) {
+    Write-Host "Building store rotation tests with zig: $exe"
+    & $exe c++ @atomicBuildArgs
+} else {
+    Write-Host "Building store rotation tests with: $exe"
+    & $exe @atomicBuildArgs
+}
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    throw "store rotation test build failed"
+}
+& $atomicOut
 if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
 
 Pop-Location

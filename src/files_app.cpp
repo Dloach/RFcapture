@@ -11,6 +11,7 @@
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "sd_mount.h"
+#include "spiffs_mount.h"
 #include "ui_hint.h"
 
 namespace filesapp {
@@ -47,6 +48,9 @@ bool deleteArmed = false;
 uint32_t deleteAt = 0;
 char note[48] = {0};
 bool sdOk = false;
+bool formatHint = false;   // SPIFFS is not mounted: offer the explicit format
+bool formatArmed = false;
+uint32_t formatAt = 0;
 uint32_t prevActions = 0;
 
 struct Hint {
@@ -87,6 +91,17 @@ void header(const char* title)
 
 void refresh();
 
+// Build "<cwd>/<name>" into `out`.  Returns false when it would not fit, so a
+// deep directory or a long file name is reported instead of silently turning
+// into a different (shorter) path that then gets deleted or opened.
+bool joinPath(char* out, size_t cap, const char* dir, const char* name)
+{
+    if (out == nullptr || cap == 0 || dir == nullptr || name == nullptr) return false;
+    const int n = (strcmp(dir, "/") == 0) ? snprintf(out, cap, "/%s", name)
+                                          : snprintf(out, cap, "%s/%s", dir, name);
+    return n > 0 && static_cast<size_t>(n) < cap;
+}
+
 void drawList()
 {
     lcd.fillScreen(kBg);
@@ -118,7 +133,13 @@ void drawList()
     }
 
     lcd.setTextColor(note[0] ? kWarn : kDim, kBg);
-    lcd.drawString(note[0] ? note : "ENT open  D delete  S storage", 4, 108);
+    if (note[0]) {
+        lcd.drawString(note, 4, 108);
+    } else if (formatHint) {
+        lcd.drawString("SPIFFS not mounted. F x2 = FORMAT (erases)", 4, 108);
+    } else {
+        lcd.drawString("ENT open  D delete  S storage", 4, 108);
+    }
 
     static const Hint h[] = {{"esc", "back"}};
     hints(h, 1);
@@ -169,7 +190,15 @@ void refresh()
             return;
         }
     } else {
-        SPIFFS.begin(true);
+        // Never format here: a mount failure must not wipe the SSH profiles,
+        // the NFC library and the quick-bind grid that live on this partition.
+        if (!spiffsstore::ensure()) {
+            snprintf(note, sizeof(note), "SPIFFS NOT MOUNTED");
+            formatHint = true;
+            dirty      = true;
+            return;
+        }
+        formatHint = false;
     }
 
     File dir;
@@ -193,7 +222,7 @@ void refresh()
         }
         if (entries.size() < 64) {
             Entry e{};
-            strncpy(e.name, base, sizeof(e.name) - 1);
+            snprintf(e.name, sizeof(e.name), "%s", base);
             e.dir  = f.isDirectory();
             e.size = e.dir ? 0 : f.size();
             entries.push_back(e);
@@ -213,12 +242,19 @@ void openEntry()
 {
     if (sel < 0 || sel >= static_cast<int>(entries.size())) return;
     Entry e = entries[sel];
-    char path[160];
-    if (strcmp(cwd, "/") == 0) snprintf(path, sizeof(path), "/%s", e.name);
-    else snprintf(path, sizeof(path), "%s/%s", cwd, e.name);
+
+    // cwd is up to 127 chars and a name up to 63, so the buffer has to hold both
+    // plus the separator; joinPath() reports a path that would not fit instead
+    // of truncating it into a different file.
+    char path[224];
+    if (!joinPath(path, sizeof(path), cwd, e.name)) {
+        snprintf(note, sizeof(note), "PATH TOO LONG");
+        dirty = true;
+        return;
+    }
 
     if (e.dir) {
-        strncpy(cwd, path, sizeof(cwd) - 1);
+        snprintf(cwd, sizeof(cwd), "%s", path);
         refresh();
         return;
     }
@@ -233,7 +269,7 @@ void openEntry()
     }
     viewerLines = 0;
     viewerTop   = 0;
-    strncpy(viewerName, e.name, sizeof(viewerName) - 1);
+    snprintf(viewerName, sizeof(viewerName), "%s", e.name);
     while (f.available() && viewerLines < 80) {
         String line = f.readStringUntil('\n');
         line.trim();
@@ -256,16 +292,27 @@ void deleteSelected()
         dirty = true;
         return;
     }
-    char path[160];
-    if (strcmp(cwd, "/") == 0) snprintf(path, sizeof(path), "/%s", e.name);
-    else snprintf(path, sizeof(path), "%s/%s", cwd, e.name);
+    char path[224];
+    if (!joinPath(path, sizeof(path), cwd, e.name)) {
+        snprintf(note, sizeof(note), "PATH TOO LONG");
+        dirty = true;
+        return;
+    }
     bool ok = storage == Storage::kSd ? SD.remove(path) : SPIFFS.remove(path);
     snprintf(note, sizeof(note), ok ? "DELETED" : "DELETE FAILED");
     if (ok) refresh();
     dirty = true;
 }
 
-enum : uint32_t { kUp = 1, kDown = 2, kEnter = 4, kBack = 8, kDelete = 16, kStorage = 32 };
+enum : uint32_t {
+    kUp      = 1,
+    kDown    = 2,
+    kEnter   = 4,
+    kBack    = 8,
+    kDelete  = 16,
+    kStorage = 32,
+    kFormat  = 64,  // SPIFFS only, and only behind a double press
+};
 
 uint32_t readActions()
 {
@@ -279,6 +326,7 @@ uint32_t readActions()
             case '`': case '~': case 0x1B: a |= kBack; break;
             case 'd': case 'D': a |= kDelete; break;
             case 's': case 'S': a |= kStorage; break;
+            case 'f': case 'F': a |= kFormat; break;
             default: break;
         }
     }
@@ -313,6 +361,34 @@ void loop()
         deleteArmed = false;
         if (strcmp(note, "PRESS D AGAIN") == 0) note[0] = 0;
         dirty = true;
+    }
+    if (formatArmed && millis() - formatAt > 4000) {
+        formatArmed = false;
+        if (strncmp(note, "F x2 TO FORMAT", 14) == 0) note[0] = 0;
+        dirty = true;
+    }
+
+    // Formatting the partition is destructive, so it is never automatic: the
+    // operator asks for it twice, from the screen that just said the file system
+    // could not be mounted.
+    if (screen == Screen::kList && (pressed & kFormat) != 0) {
+        if (storage != Storage::kSpiffs) {
+            snprintf(note, sizeof(note), "F FORMATS SPIFFS ONLY");
+        } else if (!formatArmed) {
+            formatArmed = true;
+            formatAt    = millis();
+            snprintf(note, sizeof(note), "F x2 TO FORMAT - ERASES ALL");
+        } else {
+            formatArmed = false;
+            if (spiffsstore::formatAndMount()) {
+                snprintf(note, sizeof(note), "SPIFFS FORMATTED");
+            } else {
+                snprintf(note, sizeof(note), "FORMAT FAILED");
+            }
+        }
+        dirty = true;
+        draw();
+        return;
     }
 
     if (screen == Screen::kViewer) {

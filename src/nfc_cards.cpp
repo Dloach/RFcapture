@@ -16,6 +16,8 @@
 #include <cstring>
 
 #include "sd_mount.h"
+#include "atomic_store.h"
+#include "spiffs_mount.h"
 
 namespace nfccards {
 
@@ -34,6 +36,8 @@ constexpr char kImport[] = "/nfc/cards.txt";
 constexpr int kSdCs      = 12;
 constexpr char kSdDir[]  = "/nfc";
 constexpr char kSdPath[] = "/nfc/cards.bak";
+constexpr char kSdTmp[]  = "/nfc/cards.tmp";
+constexpr char kSdBak[]  = "/nfc/cards.old";
 
 // Hit counts are cosmetic and change every 400 ms while a card sits on the
 // reader, so they must not rewrite the whole SPIFFS file each time.  New cards,
@@ -223,18 +227,28 @@ bool save()
     f.close();
     if (!ok) {
         lastError = "write failed";
+        SPIFFS.remove(kTmp);
         return false;
     }
 
-    if (SPIFFS.exists(kPath)) {
-        if (SPIFFS.exists(kBak)) SPIFFS.remove(kBak);
-        SPIFFS.rename(kPath, kBak);
+    // Verify before rotating: an empty or truncated temp file must not replace
+    // a library that is known to load.
+    File check = SPIFFS.open(kTmp, FILE_READ);
+    if (!check || check.size() == 0) {
+        if (check) check.close();
+        SPIFFS.remove(kTmp);
+        lastError = "verify failed";
+        return false;
     }
-    if (!SPIFFS.rename(kTmp, kPath)) {
+    check.close();
+
+    // Rotate: the previous library is kept as .bak, so a failure here (or a
+    // power cut right after) leaves a loadable file behind and load() falls
+    // back to it.
+    if (!atomicstore::rotate(SPIFFS, kTmp, kPath, kBak)) {
         lastError = "rename failed";
         return false;
     }
-    if (SPIFFS.exists(kBak)) SPIFFS.remove(kBak);
     lastError     = nullptr;
     dirty_        = false;
     lastFlushMs_  = millis();
@@ -323,7 +337,10 @@ bool backupToSd()
         return false;
     }
     if (!SD.exists(kSdDir)) SD.mkdir(kSdDir);
-    File f = SD.open(kSdPath, FILE_WRITE);
+
+    // Same temp-then-rotate rule as the SPIFFS library: a backup interrupted
+    // half way must not look like a complete one.
+    File f = SD.open(kSdTmp, FILE_WRITE);
     if (!f) {
         lastError = "TF write failed";
         return false;
@@ -341,7 +358,21 @@ bool backupToSd()
     }
     f.close();
     if (!ok) {
+        SD.remove(kSdTmp);
         lastError = "TF write failed";
+        return false;
+    }
+
+    File check = SD.open(kSdTmp, FILE_READ);
+    if (!check || check.size() == 0) {
+        if (check) check.close();
+        SD.remove(kSdTmp);
+        lastError = "TF verify failed";
+        return false;
+    }
+    check.close();
+    if (!atomicstore::rotate(SD, kSdTmp, kSdPath, kSdBak)) {
+        lastError = "TF rename failed";
         return false;
     }
     lastError = nullptr;
@@ -366,6 +397,7 @@ bool restoreFromSd()
 
     count = 0;
     char line[160];
+    int bad = 0;
     while (f.available() > 0 && count < kMaxCards) {
         size_t k = 0;
         while (f.available() > 0 && k + 1 < sizeof(line)) {
@@ -377,13 +409,18 @@ bool restoreFromSd()
         if (k == 0) continue;
         Card c;
         if (parseLine(line, c)) cards[count++] = c;
+        else ++bad;
     }
     f.close();
 
-    if (count == 0) {
+    // Restore only a file that parses completely.  Applying a half-readable
+    // backup would replace a good library with whatever happened to survive.
+    if (count == 0 || bad > 0) {
         memcpy(cards, keep, sizeof(cards));
         count     = keepCount;
-        lastError = "TF backup empty";
+        lastError = bad > 0 ? "TF backup rejected" : "TF backup empty";
+        Serial.printf("[nfc] restore rejected: %d card(s) ok, %d unreadable\n",
+                      static_cast<int>(count), bad);
         return false;
     }
     save();
@@ -397,7 +434,7 @@ int8_t load()
     count  = 0;
     dirty_ = false;
     lastFlushMs_ = millis();
-    if (!SPIFFS.begin(false) && !SPIFFS.begin(true)) {
+    if (!spiffsstore::ensure()) {
         lastError = "SPIFFS not mounted";
         return 0;
     }

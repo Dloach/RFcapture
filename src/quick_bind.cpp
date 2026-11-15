@@ -2,6 +2,9 @@
 
 #include <SPIFFS.h>
 
+#include "atomic_store.h"
+#include "spiffs_mount.h"
+
 namespace quickbind {
 
 Binding slots[kPages][kSlots];
@@ -10,6 +13,8 @@ const uint16_t kColors[8] = {0x07E0, 0xF800, 0x001F, 0xFFE0, 0xFD20, 0x801F, 0xF
 
 namespace {
 constexpr char kPath[] = "/quick.txt";
+constexpr char kTmp[]  = "/quick.tmp";
+constexpr char kBak[]  = "/quick.bak";
 constexpr char kKeys[kSlots] = {'8', '9', '0', 'I', 'O', 'P', 'J', 'K', 'L'};
 constexpr const char* kLegends[kSlots] = {"8", "9", "0", "I", "O", "P", "J", "K", "L"};
 }  // namespace
@@ -19,9 +24,14 @@ void load()
     for (auto& page : slots) {
         for (auto& b : page) b = Binding{};
     }
-    if (!SPIFFS.begin(false) && !SPIFFS.begin(true)) return;
-    if (!SPIFFS.exists(kPath)) return;
-    File f = SPIFFS.open(kPath, FILE_READ);
+    // Mounting never formats: a transient mount failure used to erase the grid.
+    if (!spiffsstore::ensure()) return;
+
+    // A save that was interrupted leaves the previous grid as .bak; start from
+    // that instead of from an empty grid.
+    const char* path = SPIFFS.exists(kPath) ? kPath : (SPIFFS.exists(kBak) ? kBak : nullptr);
+    if (path == nullptr) return;
+    File f = SPIFFS.open(path, FILE_READ);
     if (!f) return;
     char line[64];
     while (f.available() > 0) {
@@ -60,22 +70,39 @@ void load()
 
 bool save()
 {
-    if (!SPIFFS.begin(false)) return false;
-    File f = SPIFFS.open(kPath, FILE_WRITE);
+    if (!spiffsstore::ensure()) return false;
+
+    // Write the whole grid to a temp file first: the grid on flash stays valid
+    // until the new copy is complete and readable.
+    File f = SPIFFS.open(kTmp, FILE_WRITE);
     if (!f) return false;
     for (int page = 0; page < kPages; ++page) {
         for (int i = 0; i < kSlots; ++i) {
             if (slots[page][i].kind == kNone) continue;
-            f.printf("%d;%d;%u;%u;%u;%u;%lu\n", page, i,
-                     static_cast<unsigned>(slots[page][i].kind),
-                     static_cast<unsigned>(slots[page][i].index),
-                     static_cast<unsigned>(slots[page][i].icon),
-                     static_cast<unsigned>(slots[page][i].color),
-                     static_cast<unsigned long>(slots[page][i].key));
+            if (f.printf("%d;%d;%u;%u;%u;%u;%lu\n", page, i,
+                         static_cast<unsigned>(slots[page][i].kind),
+                         static_cast<unsigned>(slots[page][i].index),
+                         static_cast<unsigned>(slots[page][i].icon),
+                         static_cast<unsigned>(slots[page][i].color),
+                         static_cast<unsigned long>(slots[page][i].key)) == 0) {
+                f.close();
+                SPIFFS.remove(kTmp);
+                return false;
+            }
         }
     }
     f.close();
-    return true;
+
+    // Verify before rotating: a truncated temp file must not replace the grid.
+    File check = SPIFFS.open(kTmp, FILE_READ);
+    if (!check || check.size() == 0) {
+        if (check) check.close();
+        SPIFFS.remove(kTmp);
+        return false;
+    }
+    check.close();
+
+    return atomicstore::rotate(SPIFFS, kTmp, kPath, kBak);
 }
 
 void clear(int page, int slot)

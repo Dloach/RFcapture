@@ -47,7 +47,9 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
     AIR CON 空调页、Flipper `.ir` 回放、外接模块学习、UNIVERSAL 电视键、MY CODES。
 - **SETTINGS → BACKUP / RESTORE**
   - 一次把 RF 永久信号、NFC 卡库、九宫格绑定写到 TF 卡；
-  - `RESTORE FROM TF` 恢复三份数据（会先确认）。
+  - `RESTORE FROM TF` 恢复三份数据（会先确认）；
+  - 所有存储都是「先写 `.tmp`、校验、再轮转 `<name>.bak`」：断电或拔卡不会
+    留下半个文件；恢复只接受完整可解析的备份，半份备份会被拒绝而不是覆盖现有数据。
 - **KEYBOARD**
   - `USB / WIRED`：TinyUSB 复合设备（HID + CDC），插 PC 直接当键盘；
   - `BLUETOOTH`：BLE HID，主机名 `Cardputer-KB`，支持 bonded 重连；
@@ -69,6 +71,7 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
 - **FILES**
   - TF / SPIFFS 切换，目录浏览，文本查看；
   - `D` 连按两次删除文件，不支持目录递归删除；
+  - SPIFFS 挂不上时不再自动格式化：屏幕会提示，`F` 连按两次才格式化（会清空）；
   - 详细说明见 [docs/LOCAL.md](docs/LOCAL.md)。
 - **BADUSB**
   - 从 TF `/badusb/*.txt` 读取 DuckyScript 子集；
@@ -77,7 +80,9 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
 - **USB DISK**
   - 独立启动模式，把 TF 卡作为 USB MSC 盘；
   - 电脑直接挂载、复制、删除文件；
-  - 退出前必须在电脑上安全弹出；详细见 [docs/LOCAL.md](docs/LOCAL.md)。
+  - 固件监听主机的 start/stop 回调：**没安全弹出就拒绝退出**，屏幕显示
+    `DO NOT UNPLUG`；`esc` 连按三次强制退出（日志留痕，FAT 可能损坏）；
+  - 详细见 [docs/LOCAL.md](docs/LOCAL.md)。
 - **SSH**
   - 自动使用 SETTINGS 里保存的 WiFi；
   - 最多 4 个 profile（NAME / HOST / PORT / USER / AUTH / PASS|KEY），`+ NEW PROFILE` 新建；

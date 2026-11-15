@@ -10,6 +10,7 @@ tests/host/test_decoder
 tests/host/test_ssh_terminal
 tests/host/test_ir
 tests/host/test_ir_file
+tests/host/test_atomic_store
 *.pdb
 *.obj
 *.ilk

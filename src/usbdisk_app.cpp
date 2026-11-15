@@ -1,3 +1,26 @@
+/*
+ * USB DISK: expose the TF card to a PC as a USB mass-storage drive.
+ *
+ * The dangerous part is leaving.  The card's file system is cached by the host,
+ * so a reboot (or a card pull) while the host still thinks it owns the drive can
+ * leave a half-updated FAT behind -- a corrupted file system, not just a lost
+ * file.  The MSC start/stop callback is the only signal this firmware gets that
+ * the host has finished with the medium, so this app tracks it and refuses the
+ * normal exit until it has been seen:
+ *
+ *   start unit  (start=1)  host took the medium
+ *   stop unit   (start=0)  host released it ("Safely Remove", or a shutdown)
+ *
+ * `mediaPresent(false)` is asserted before the reboot so a listening host is
+ * told the medium went away rather than being left to discover it later.
+ *
+ * The guard is a UX guard, not a substitute for the host's own flush: only the
+ * PC can guarantee that its cache reached the card, which is why the screen
+ * keeps telling the operator to eject first.  A forced exit exists (three
+ * presses) for the case where the host has hung or its cable was pulled, and it
+ * says so in the log.
+ */
+
 #include "usbdisk_app.h"
 
 #include <M5Cardputer.h>
@@ -28,8 +51,17 @@ auto& lcd = M5Cardputer.Display;
 USBMSC* msc = nullptr;
 bool ready = false;
 bool sdOk  = false;
-char note[40] = {0};
+char note[48] = {0};
 uint32_t prevActions = 0;
+
+// Host-side medium ownership, written from the TinyUSB task.
+volatile bool hostActive   = false;  // the host has taken the medium
+volatile bool hostReleased = false;  // the host stopped / unloaded it
+volatile bool hostWrote    = false;  // the host changed sectors
+
+// Forced exit: three presses while the host still owns the drive.
+uint32_t forceAt    = 0;
+uint8_t forceCount  = 0;
 
 struct Hint {
     const char* key;
@@ -61,6 +93,24 @@ void header()
     lcd.drawRightString(bat, lcd.width() - 3, 2);
 }
 
+/// True when the host no longer owns the medium: it ejected, never mounted it,
+/// or never wrote to it (nothing can be pending in that case).
+bool canExitSafely()
+{
+    if (!hostActive) return true;
+    if (hostReleased) return true;
+    if (!hostWrote) return true;
+    return false;
+}
+
+const char* hostStateText()
+{
+    if (!hostActive) return "PC NOT MOUNTED";
+    if (hostReleased) return "EJECTED - SAFE";
+    if (!hostWrote) return "MOUNTED (read only)";
+    return "DO NOT UNPLUG";
+}
+
 void draw()
 {
     lcd.fillScreen(kBg);
@@ -79,10 +129,13 @@ void draw()
                  static_cast<unsigned long>(SD.cardSize() / (1024ULL * 1024ULL)),
                  static_cast<unsigned long>(SD.numSectors()));
         lcd.drawString(info, 8, 40);
+
+        lcd.setTextColor(canExitSafely() ? kOk : kWarn, kBg);
+        lcd.drawString(hostStateText(), 8, 54);
+
         lcd.setTextColor(kDim, kBg);
-        lcd.drawString(note[0] ? note : "Open the new drive on the PC.", 8, 58);
-        lcd.drawString("EJECT / SAFELY REMOVE before exit.", 8, 70);
-        lcd.drawString("esc returns to launcher.", 8, 82);
+        lcd.drawString(note[0] ? note : "EJECT the drive on the PC first.", 8, 70);
+        lcd.drawString("Then esc. Do not pull the cable while writing.", 8, 82);
     }
     static const Hint h[] = {{"esc", "back"}};
     hints(h, 1);
@@ -110,10 +163,33 @@ int32_t writeCallback(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t b
     for (uint32_t i = 0; i < count; ++i) {
         if (!SD.writeRAW(buffer + i * sec, lba + i)) return -1;
     }
+    // From here on the host may hold a cached FAT that only it can flush.
+    hostWrote = true;
     return static_cast<int32_t>(bufsize);
 }
 
-bool startStopCallback(uint8_t, bool, bool) { return true; }
+// TinyUSB calls this on "start unit", "stop unit", and "load/eject medium".
+// Returning true acknowledges; the value that matters is the state we record.
+bool startStopCallback(uint8_t power_condition, bool start, bool load_eject)
+{
+    (void)power_condition;
+    hostActive   = start;
+    hostReleased = !start;
+    Serial.printf("[msc] start_stop start=%d eject=%d -> %s\n", static_cast<int>(start),
+                  static_cast<int>(load_eject), hostReleased ? "released" : "active");
+    return true;
+}
+
+/// Detach the medium and let the card go before the reset.
+void shutdownMedium()
+{
+    if (msc != nullptr) {
+        msc->mediaPresent(false);
+        delay(120);  // give the host a chance to see the removal
+        msc->end();
+    }
+    SD.end();
+}
 
 enum : uint32_t { kBack = 1 };
 
@@ -163,6 +239,7 @@ void setup()
     ready = msc->begin(SD.numSectors(), SD.sectorSize());
     if (!ready) snprintf(note, sizeof(note), "MSC INIT FAILED");
     USB.begin();
+    Serial.println("[msc] media present, waiting for a host");
     draw();
 }
 
@@ -174,9 +251,31 @@ void loop()
     prevActions            = actions;
 
     if (pressed & kBack) {
-        // The host must eject first; this is only a UX guard, not a safe
-        // unmount protocol.
-        launcher::rebootInto(launcher::kAppMenu);
+        if (canExitSafely()) {
+            Serial.println("[msc] safe exit");
+            shutdownMedium();
+            launcher::rebootInto(launcher::kAppMenu);
+        } else {
+            // Refuse, and say exactly why.  The host's cache is the problem; only
+            // the host can flush it.
+            const uint32_t now = millis();
+            if (forceCount == 0 || now - forceAt > 4000) forceCount = 0;
+            ++forceCount;
+            forceAt = now;
+            if (forceCount >= 3) {
+                Serial.println("[msc] FORCED exit with the host still mounted");
+                snprintf(note, sizeof(note), "FORCED EXIT - FS MAY BE DAMAGED");
+                draw();
+                delay(400);
+                shutdownMedium();
+                launcher::rebootInto(launcher::kAppMenu);
+            } else {
+                snprintf(note, sizeof(note), "EJECT ON PC FIRST - esc x%u TO FORCE",
+                         static_cast<unsigned>(3 - forceCount));
+                draw();
+            }
+            prevActions = readActions();
+        }
     }
     delay(5);
 }

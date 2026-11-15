@@ -1,6 +1,7 @@
 #include "tf_backup.h"
 
 #include "sd_mount.h"
+#include "atomic_store.h"
 
 #include <SD.h>
 #include <SPI.h>
@@ -16,6 +17,7 @@ constexpr uint32_t kSdHz      = 10000000;
 constexpr const char* kDir    = "/cardputer";
 constexpr const char* kPath   = "/cardputer/signals.txt";
 constexpr const char* kTmp    = "/cardputer/signals.tmp";
+constexpr const char* kBak    = "/cardputer/signals.bak";
 constexpr const char* kHeader = "CardputerSig 1";
 
 // The card is only mounted for the duration of one backup / restore, so the
@@ -63,6 +65,31 @@ bool writeSignal(File& file, const SavedSignal& signal)
     return file.print('\n') == 1;
 }
 
+// Open the newest backup that still carries the right header, leaving the file
+// positioned after that header.  The previous save is kept as `.bak`, so a
+// primary file that lost its header is not the end of the road.
+File openVerified(bool* fromBak)
+{
+    if (fromBak != nullptr) *fromBak = false;
+    const char* candidates[2] = {kPath, kBak};
+    for (int i = 0; i < 2; ++i) {
+        File probe = SD.open(candidates[i], FILE_READ);
+        if (!probe) continue;
+        String head = probe.readStringUntil('\n');
+        head.trim();
+        probe.close();
+        if (head != kHeader) continue;
+
+        File file = SD.open(candidates[i], FILE_READ);
+        if (!file) continue;
+        String skip = file.readStringUntil('\n');  // consume the header line
+        skip.trim();
+        if (fromBak != nullptr) *fromBak = (i == 1);
+        return file;
+    }
+    return File();
+}
+
 // Restore target lives in .bss: eight SavedSignal records would be ~2.7 kB of
 // task stack.
 SavedSignal g_items[rfcfg::maxSaved];
@@ -96,9 +123,19 @@ TfResult saveSignals(const SavedStore& store, int* count)
     file.close();
 
     if (ok) {
-        SD.remove(kPath);
-        ok = SD.rename(kTmp, kPath);
+        // Verify the temp file before rotating it in: the old backup must never
+        // be replaced by a write that did not finish.
+        File check = SD.open(kTmp, FILE_READ);
+        if (!check) {
+            ok = false;
+        } else {
+            String head = check.readStringUntil('\n');
+            head.trim();
+            ok = (head == kHeader);
+            check.close();
+        }
     }
+    if (ok) ok = atomicstore::rotate(SD, kTmp, kPath, kBak);
     if (!ok) SD.remove(kTmp);
 
     unmount();
@@ -115,19 +152,14 @@ TfResult loadSignals(SavedStore& store, int* count)
     Serial.printf("[tfs] load start\n");
     if (!mount()) return TfResult::kNoCard;
 
-    File file = SD.open(kPath, FILE_READ);
+    bool fromBak = false;
+    File file    = openVerified(&fromBak);
     if (!file) {
+        const bool any = SD.exists(kPath) || SD.exists(kBak);
         unmount();
-        return TfResult::kNoFile;
+        return any ? TfResult::kBadFile : TfResult::kNoFile;
     }
-
-    String header = file.readStringUntil('\n');
-    header.trim();
-    if (header != kHeader) {
-        file.close();
-        unmount();
-        return TfResult::kBadFile;
-    }
+    if (fromBak) Serial.println("[tfs] primary unusable, restoring from .bak");
 
     int loaded   = 0;
     bool skipped = false;
@@ -202,13 +234,21 @@ TfResult loadSignals(SavedStore& store, int* count)
     file.close();
     unmount();
 
-    if (loaded == 0) return skipped ? TfResult::kBadFile : TfResult::kEmpty;
+    // A file with unreadable records is refused outright rather than applied
+    // partially: restoring half a library over a good one loses signals the
+    // operator has no other copy of.
+    if (skipped) {
+        Serial.printf("[tfs] load rejected: %d good, %d unreadable\n", loaded,
+                      static_cast<int>(skipped));
+        return loaded > 0 ? TfResult::kPartial : TfResult::kBadFile;
+    }
+    if (loaded == 0) return TfResult::kEmpty;
 
     store.replaceAll(g_items, loaded);
     if (count) *count = loaded;
-    Serial.printf("[tfs] load done n=%d skip=%d dt=%lums\n", loaded, skipped,
+    Serial.printf("[tfs] load done n=%d dt=%lums\n", loaded,
                   static_cast<unsigned long>(millis() - t0));
-    return skipped ? TfResult::kPartial : TfResult::kOk;
+    return TfResult::kOk;
 }
 
 }  // namespace tfbackup

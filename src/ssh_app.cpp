@@ -26,6 +26,7 @@
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
+#include "spiffs_mount.h"
 #include "ssh_terminal.h"
 #include "ui_hint.h"
 #include "wifi_store.h"
@@ -712,11 +713,14 @@ void sshTask(void*)
     long timeout = 15;
     ssh_options_set(session, SSH_OPTIONS_TIMEOUT, &timeout);
 
-    if (!SPIFFS.begin(true) || !SPIFFS.exists("/ssh")) {
-        if (!SPIFFS.mkdir("/ssh")) {
-            setError("SPIFFS /ssh unavailable");
-            goto done;
-        }
+    if (!spiffsstore::ensure()) {
+        // Never format here: a mount failure would wipe every profile and key.
+        setError("SPIFFS not mounted");
+        goto done;
+    }
+    if (!SPIFFS.exists("/ssh") && !SPIFFS.mkdir("/ssh")) {
+        setError("SPIFFS /ssh unavailable");
+        goto done;
     }
     sshPhase = 1;
     if (ssh_connect(session) != SSH_OK) {
@@ -1198,7 +1202,12 @@ void importKeyFromSd()
         return;
     }
 
-    SPIFFS.begin(true);
+    if (!spiffsstore::ensure()) {
+        src.close();
+        copyCString(note, sizeof(note), "SPIFFS NOT MOUNTED");
+        dirty = true;
+        return;
+    }
     if (!SPIFFS.exists("/ssh")) SPIFFS.mkdir("/ssh");
     File dst = SPIFFS.open("/ssh/id_ed25519", FILE_WRITE);
     if (!dst) {
@@ -1472,7 +1481,11 @@ void handleError(uint32_t pressed)
         return;
     }
     if (pressed & kClear) {
-        SPIFFS.begin(true);
+        if (!spiffsstore::ensure()) {
+            copyCString(note, sizeof(note), "SPIFFS NOT MOUNTED");
+            dirty = true;
+            return;
+        }
         SPIFFS.remove("/ssh/known_hosts");
         SPIFFS.remove("/ssh/hostkeys.txt");
         copyCString(note, sizeof(note), "HOST KEYS CLEARED");

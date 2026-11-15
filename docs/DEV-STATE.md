@@ -1268,3 +1268,60 @@ pio run -d Y:\2026\cardputer\retry -e retry-emu -t upload --upload-port COM10
 6. 学习端（RMT 接收 + 分帧）**一行都没在硬件上跑过**：没有接收模块时学习页只会
    显示 `NO RECEIVER`，所以 `ir_rx.cpp` 的 ring buffer 分帧、20 ms 空闲阈值、
    模块 AGC 对长脉冲的拉伸，全部待测。
+
+## 16. 存储安全（2026-11-16，代码审查驱动的四个修复）
+
+审查指出四处会在掉电/误操作时吃掉数据的地方，全部改掉，并补了 host 测试。
+
+### 16.1 USB DISK 退出会损坏 FAT
+
+`onStartStop` 回调原来只 `return true`，退出只认 esc —— 主机还挂着就重启，
+它的 FAT 缓存没落盘，卡就坏了。
+
+现在：`src/usbdisk_app.cpp` 记录 `start`（主机接管）与 `stop`（弹出/卸载），
+并记 `hostWrote`（主机写过扇区）。规则：
+
+- 安全：主机从未挂载、已弹出、或从未写过；
+- 不安全：挂载且写过但没弹出 → 拒绝退出，屏幕显示 `DO NOT UNPLUG`；
+- 强制：`esc` 连按三次，日志写 `FORCED exit`，先 `mediaPresent(false)` 再重启。
+
+界面新增一行主机状态（`PC NOT MOUNTED` / `EJECTED - SAFE` / `DO NOT UNPLUG`）。
+回调返回 true 是必要条件而不是充分条件：只有 PC 自己能保证它的缓存落了盘，
+所以屏幕一直提示先弹出。
+
+### 16.2 SPIFFS 挂载失败会格式化
+
+`SPIFFS.begin(true)` 会在挂载失败时格式化，而挂载失败可能只是瞬时错误。
+一次误挂载会清掉 SSH profile、NFC 卡库、九宫格绑定。
+
+现在：`src/spiffs_mount.h` 提供 `ensure()`（`begin(false)`，永不格式化）和
+`formatAndMount()`（只在用户明确操作时调用）。全部调用点改为 `ensure()`：
+files_app / ssh_app ×3 / nfc_cards / quick_bind。格式化入口只有
+`FILES → SPIFFS → F 连按两次`，且屏幕明说会清空。
+
+### 16.3 备份不是原子写入
+
+- RF 备份是「先删旧文件再改名」，NFC/绑定是直接覆盖，九宫格根本没有临时文件；
+  TF 上的备份也是直接覆盖。
+- 现在统一走 `src/atomic_store.h` 的 `rotate()`：写 `<path>.tmp` → 校验
+  （重新打开、检查大小/首行表头）→ 轮转 `<path>` 到 `<path>.bak` →
+  `<path>.tmp` 到 `<path>`。失败会回滚，`.bak` 保留不删。
+- 读取端在 `<path>` 缺失或表头不对时回退到 `.bak`（tf_backup、nfc_cards、quick_bind）。
+- **恢复改为全量校验**：tf_backup 有任何一条记录解析失败就整体拒绝（`kPartial`
+  且不写库），nfc_cards 有任何一行解析失败就保留原有卡库；quick.txt 的恢复也走
+  tmp+rotate 并校验字节数。
+
+### 16.4 文件浏览器路径截断
+
+`cwd[128]` + 文件名 63 字符会超 `path[160]`，`strncpy` 也不保证结尾 `\0`。
+现在 `path[224]` + `joinPath()`（`snprintf` 返回值检查，放不下就报
+`PATH TOO LONG` 而不是打开/删除一个被截断的别的路径），文件名字段全部改用
+`snprintf`。
+
+### 16.5 验证
+
+`tests/host/test_atomic_store.cpp`：用会按需失败的假文件系统跑 26 项，
+覆盖首次保存、覆盖、陈旧 .bak、缺 tmp、两处 rename 失败的回滚、空指针、
+以及「.bak 必须是完整的上一版」。全套 host 测试 484 项通过。
+固件：Flash 71.8% / RAM 69.2%。
+

@@ -28,6 +28,7 @@
 
 #include <memory>
 
+#include "atomic_store.h"
 #include "launcher.h"
 #include "nfc_cards.h"
 #include "polling_keyboard.h"
@@ -149,12 +150,24 @@ void draw()
 
 // The quick-bind table rides along as a plain file copy: SPIFFS /quick.txt
 // <-> SD /quick.txt, same "one obvious backup slot" rule as the NFC cards.
+//
+// Both directions copy into `<dst>.tmp` and rotate, so an interrupted backup or
+// restore cannot replace the file it was refreshing with half of itself.
 bool copyFile(fs::FS& from, const char* src, fs::FS& dst, const char* dstPath)
 {
     if (!from.exists(src)) return true;  // nothing to copy is not an error
     File in = from.open(src, FILE_READ);
     if (!in) return false;
-    File out = dst.open(dstPath, FILE_WRITE);
+
+    char tmpPath[96];
+    char bakPath[96];
+    if (snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dstPath) <= 0 ||
+        snprintf(bakPath, sizeof(bakPath), "%s.bak", dstPath) <= 0) {
+        in.close();
+        return false;
+    }
+
+    File out = dst.open(tmpPath, FILE_WRITE);
     if (!out) {
         in.close();
         return false;
@@ -162,15 +175,30 @@ bool copyFile(fs::FS& from, const char* src, fs::FS& dst, const char* dstPath)
     uint8_t buf[128];
     int n;
     bool ok = true;
+    size_t written = 0;
     while ((n = in.read(buf, sizeof(buf))) > 0) {
         if (out.write(buf, static_cast<size_t>(n)) != static_cast<size_t>(n)) {
             ok = false;
             break;
         }
+        written += static_cast<size_t>(n);
     }
+    const size_t expected = in.size();
     in.close();
     out.close();
-    return ok;
+
+    if (ok && written != expected) ok = false;
+    if (ok) {
+        // Verify what landed before it becomes the live file.
+        File check = dst.open(tmpPath, FILE_READ);
+        ok = (check && check.size() == expected);
+        if (check) check.close();
+    }
+    if (!ok) {
+        dst.remove(tmpPath);
+        return false;
+    }
+    return atomicstore::rotate(dst, tmpPath, dstPath, bakPath);
 }
 
 void doBackup()

@@ -28,6 +28,9 @@ ir_sources=("tests/host/test_ir.cpp" "src/ir_protocol.cpp")
 # Flipper .ir parser: brings its own stubs for the ir:: symbols.
 ir_file_out="tests/host/test_ir_file"
 ir_file_sources=("tests/host/test_ir_file.cpp" "src/ir_file.cpp")
+# Store rotation: header-only helper, tested against a fake file system.
+atomic_out="tests/host/test_atomic_store"
+atomic_sources=("tests/host/test_atomic_store.cpp")
 
 compiler="${COMPILER:-}"
 
@@ -127,3 +130,14 @@ else
 fi
 echo
 "$ir_file_out"
+
+atomic_args=(-std=c++17 -O2 -Wall -Wextra -I src -o "$atomic_out" "${atomic_sources[@]}")
+echo
+echo "Building store rotation tests with: $compiler"
+if [[ "$is_zig" == true ]]; then
+    "$compiler" c++ "${atomic_args[@]}"
+else
+    "$compiler" "${atomic_args[@]}"
+fi
+echo
+"$atomic_out"
