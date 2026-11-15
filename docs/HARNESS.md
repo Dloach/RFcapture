@@ -1,115 +1,227 @@
-# Cardputer ↔ DeepSeek Harness
+# Cardputer ↔ DeepSeek Harness (live WebSocket)
 
-Status: standalone bridge tested; Cardputer HARNESS firmware flashed. The desktop
-profile never loads a third-party plugin.
+Status: **live sharing implemented and verified on hardware.** The Cardputer and
+the Desktop drive the *same* Session, through a DSH Host plugin. The old ACP/HTTP
+relay has been retired — there is no rollback path any more.
 
 ## Architecture
 
 ```text
-Cardputer HARNESS app
-   HTTP (LAN, X-Cardputer-Token)
-        ↓
-harness-bridge/standalone.py (port 9100)
-        ↓
-dsh --profile cardputer (ACP child, NDJSON JSON-RPC)
-        ↓
-persisted DSH sessions (%USERPROFILE%\.dsh\sessions)
+Cardputer HARNESS app                    Desktop
+  M5Canvas UI, non-blocking WS client
+        │  ws://192.168.0.88:9101/cardputer?token=...
+        ▼
+  dsh-cardputer-ws  (Host plugin, runs inside the Desktop Host)
+        │  ctx.sessionController
+        ▼
+  the Session the Web UI is showing (same Agent, same log)
 ```
 
-The bridge is a separate process. It does not install a DSH profile plugin, so
-it does not trigger the desktop safe-mode warning.
+No second Agent, no separate Session, no polling: assistant text arrives as
+`text-delta` stream frames, and both surfaces see each other's messages because
+both read the same Session log.
 
-## Start
+## Host plugin
+
+| | |
+|---|---|
+| Source (repo) | `Y:\2026\cardputer\harness-ws\plugin` |
+| Installed copy | `C:\Users\dloach\cardputer-ws` (profile links here) |
+| Endpoint | `ws://192.168.0.88:9101/cardputer?token=<token>` |
+| Health | `GET http://192.168.0.88:9101/cardputer/health?token=<token>` |
+| Port 9100 | unused — the old ACP/HTTP bridge was retired (see below) |
+| Auth | shared token: `?token=`, `X-Cardputer-Token`, or `Authorization: Bearer` |
+| Scope | loopback + RFC1918 + link-local only, no TLS |
+
+Protocol tables are in `harness-ws/plugin/docs/DETAIL.md`. Frames used by the
+device: `hello`, `sessions`, `opened`, `snapshot`, `delta`, `message`, `status`,
+`accepted`, `cancelled`, `created`, `stt`, `error`; device sends `ping`,
+`sessions`, `open`, `create`, `prompt`, `cancel`, `stt.begin/chunk/end`.
+
+The plugin exposes these Host behaviours:
+
+- `list()` for the Session deck, enriched with the `title` projection plus one
+  bounded history read per recent Session (cached per `updatedAt`), and with
+  `<system-reminder>` runtime context filtered out;
+- `create()` + `open` for Fn+N;
+- `prompt()` with `mode: 'queue'` so the Desktop shows the user message at once;
+- `follow({ assistantStream: true })` for the snapshot, committed messages,
+  running status and `text-delta` chunks (coalesced at ~60 ms / 512 chars before
+  they reach the device);
+- `cancel()`.
+
+### Install / update
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\harness-bridge\run-standalone.ps1
+# from the project, after editing the plugin
+powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\tools\harness-plugin-sync.ps1
 ```
 
-Health:
+Then reload: **Settings → Plugins → Cardputer live sessions** (toggle off/on).
+A toggle is enough — the loader re-imports the module, so no app restart is
+needed. The bundle row is `include:cardputer-ws`.
 
-```text
-http://192.168.0.88:9100/cardputer/health
+## Cardputer firmware
+
+`src/harness_app.cpp` (UI) and `src/harness_ws.cpp` (WebSocket client).
+
+- **One full-screen backbuffer.** `M5Canvas` 240×135 at 16 bpp (64.8 KiB heap);
+  every draw goes into the sprite and only a dirty frame is `pushSprite`ed. No
+  `fillScreen` of the panel in the key path.
+- **Non-blocking network.** No `HTTPClient` anywhere. The WS client keeps a
+  state machine (`kDown` → `kHandshake` → `kOpen`); while connected it only
+  drains bytes that already arrived. The single blocking call is the TCP connect
+  on a retry (≤1.5 s, only while offline).
+- **Memory.** The old 64 KiB static WAV buffer is gone — voice is captured in
+  240 ms slices and streamed as base64 (`stt.chunk`), so the Host assembles the
+  WAV. Static RAM is 54.2 % (177,580 B of 327,680) with the canvas on the heap.
+- **Session deck is home.** Title, short id, last-message preview, `*` when the
+  Session is running. 4 rows, scrolling window.
+
+### Keys
+
+| Where | Key | Action |
+|---|---|---|
+| Deck | `;` / `.` | move selection (auto-scrolls) |
+| Deck | `ENT` | open the highlighted Session |
+| Deck | `Fn+N` | create a Session and open it |
+| Deck | `Fn+S` | refresh the list |
+| Deck | `Fn+C` | link config (host / token / port) |
+| Deck | `` ` `` | back to the launcher |
+| Chat | `ENT` | send the prompt |
+| Chat | `Fn+V` | voice input — `ENT` (or `Fn+V`) stops, 20 s cap; **see note below** |
+| Chat | `Fn+;` / `Fn+.` (and `,` `;` `.` `/`) | scroll history |
+| Chat | `Fn+S` | back to the deck |
+| Chat | `Fn+N` | new Session |
+| Chat | `Fn+X` | cancel the running turn |
+| Chat | `Fn+C` | link config |
+| Chat | `` ` `` | back to the deck |
+
+`Aa`/Shift is a modifier and never produces a character; `Backspace` deletes one
+complete UTF-8 character. Both rely on the physical press-edge queue in
+`src/polling_keyboard.h`, unchanged.
+
+### Build and flash
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\tools\harness-build.ps1            # build
+powershell -ExecutionPolicy Bypass -File Y:\2026\cardputer\tools\harness-build.ps1 -Upload -Port COM13
 ```
 
-The bridge removes stale ACP children before starting. If it is force-killed, an
-orphan ACP child can hold a Session; the run script cleans only our own
-`dsh-standalone` + `cardputer` children.
+**Do not build directly in `Y:\2026\cardputer`.** This SMB share reports
+zero-length files and stale directory metadata to a remote process; PlatformIO's
+Library Dependency Finder stats every header it walks and hangs at
+"Scanning dependencies..." indefinitely. The script mirrors `src/`, `boards/` and
+`platformio.ini` to `C:\Users\dloach\build\cardputer` and builds there (~45 s).
+`Y:` stays the source of truth.
 
-## API
+### Diagnostics
 
-```text
-GET  /cardputer/health
-GET  /cardputer/sessions
-POST /cardputer/new       {"cwd":"..."}
-GET  /cardputer/messages?session=<id>&limit=80
-POST /cardputer/prompt    {"session":"<id>","text":"..."}
-POST /cardputer/cancel    {"session":"<id>"}
-POST /cardputer/close     {"session":"<id>"}
-POST /cardputer/stt       body = 16 kHz mono PCM16 WAV
+`src/usb_log.h` writes one-line logs over the USB CDC port (the `COM` port the
+Cardputer exposes; note `Serial` in this firmware is UART0 and is not routed to
+USB):
+
+```powershell
+pio device monitor -p COM13 -b 115200
 ```
 
-## Cardputer app
+Expect `harness ready heap=… canvas=1`, `[wifi] up ip=…`, `[ws] connect …`,
+`[ws] state=2`, then `[rx] …` per frame type. `[ws] down drop=tcp connect failed`
+means the Host is unreachable on 9101.
 
-launcher → **HARNESS** 首先进入 **Session 列表**（不是默认聊天）：
+## Verification
 
-- 每项显示首条用户内容作为标题，下面显示短 ID + 最后一条消息预览；
-- 空会话不进入列表（避免反复新建产生一堆 “New session”）；
-- `;` / `.` 上下移动，列表自动滚动，光标不会跑出屏幕；
-- `ENT` 打开当前高亮 Session；
-- `Fn+N` 新建会话并直接进入；
-- `Fn+C`: bridge host/token 配置；
-- `esc` 从列表返回 launcher。
+Automated checks (no device needed) live in `harness-ws/test/ws-probe.mjs` and
+use Node's built-in WebSocket client:
 
-聊天页：
-
-- `Fn+S` 返回 Session 列表；
-- `Fn+V`: 2 s 语音 → `/stt` → 填入输入框；
-- 输入英文，`ENT` 发送；
-- `Fn+;` / `Fn+.` 滚动聊天；
-- `esc` 返回 Session 列表。
-
-NVS namespace `harness`: `host`, `token`, `session`。
-
-## Windows 端看不到会话
-
-Cardputer 的 Session 写在：
-
-```text
-C:\Users\dloach\.dsh\sessions\--Y-2026-cardputer--\<sessionId>\
+```powershell
+node Y:\2026\cardputer\harness-ws\test\ws-probe.mjs list
+node Y:\2026\cardputer\harness-ws\test\ws-probe.mjs open <sessionId>
+node Y:\2026\cardputer\harness-ws\test\ws-probe.mjs prompt <sessionId> "Reply with exactly: OK"
+node Y:\2026\cardputer\harness-ws\test\ws-probe.mjs cancel <sessionId> "Write 400 words about radio"
 ```
 
-Desktop Web GUI 当前工作区是 `G:\Projects`，所以默认列表里看不到
-`Y:\2026\cardputer` 下的 Session。处理：
+Results observed against this Host:
 
-1. 在 DSH 里打开/添加工作区 `Y:\2026\cardputer`；
-2. 刷新会话列表；
-3. 选择最新的 Session（可能暂时没有标题）。
+| Check | Result |
+|---|---|
+| Plugin active, `0.0.0.0:9101` listening, health `sessions:true stt:true` | pass |
+| Wrong token rejected at handshake | pass |
+| `list` returns title / preview / short id / updatedAt / running | pass |
+| `create` makes a Session and opens it | pass |
+| `prompt` commits the user message immediately (no polling) | pass |
+| Assistant text arrives as `delta` before completion (first delta ≈1 s) | pass |
+| Committed `message` + `status running:false` follow | pass |
+| `cancel` accepted, turn settles, running false | pass |
+| Cardputer connects from 192.168.0.50 and receives frames | pass |
+| Build clean, flashed to COM13 | pass (RAM 46.0 %, Flash 71.3 %) |
 
-## 两端接力
+Still needs human eyes/hands (see the handover checklist in the final report):
+screen flicker and smoothness, key feel, voice capture, and a Desktop-typed
+message appearing on the Cardputer.
 
-bridge 在每轮回复后自动 `session/close`，释放持久化 Session：
+## The retired ACP/HTTP relay
 
-1. Cardputer 发消息 → ACP 回复 → bridge close；
-2. Windows 打开同一个 Session，查看历史并继续；
-3. Windows 离开/关闭该 Session 后，Cardputer 再发消息，ACP resume 同一个 Session；
-4. Cardputer 的 `/messages` 读同一个 JSONL 历史，因此 Windows 端的回复也能显示。
+There is no rollback path any more, by request. What was retired:
 
-同一时间只能一端拥有活动 Agent；另一端发 prompt 会得到 `BUSY`/resume 错误。
+- `harness-bridge/standalone.py` (port 9100) and its `dsh --profile cardputer`
+  ACP child — both stopped. That ACP child was the process that used to fight
+  the Desktop for a Session write handle.
+- Its autostart entry: `CardputerBridge.lnk` was moved out of the Startup folder
+  to `harness-bridge/CardputerBridge.autostart.disabled.lnk`. Moving it back
+  (and dropping the `.disabled` suffix) restores the old behaviour.
+- `run-standalone.ps1` and `standalone.py` are still on disk but are not
+  started by anything.
 
-## 语音
-
-```text
-Vosk model: Y:\2026\cardputer\harness-bridge\models\vosk-model-small-cn-0.22
-Vosk venv:  Y:\2026\cardputer\harness-bridge\.venv
-```
-
-Vosk is offline Chinese/English recognition; accuracy depends on the microphone
-and model. It is not a Chinese IME.
+`harness-bridge/` itself must stay: the plugin's voice input still uses
+`harness-bridge/.venv` (Vosk Python) and
+`harness-bridge/models/vosk-model-small-cn-0.22`.
 
 ## Known limits
 
-- LAN only, no TLS; token is a shared secret.
-- Prompt acceptance is not completion; the Cardputer polls committed history.
-- Tool permission requests are auto-allowed by the standalone bridge for this
-  trusted workspace. The desktop plugin path is intentionally not used.
-- The desktop and Cardputer cannot hold the same Agent simultaneously.
+- **Voice (`Fn+V`) works end-to-end.** Capture → base64 `stt.chunk` streaming →
+  WAV on the Host → offline Vosk → text into the input line. Short Chinese
+  phrases are recognised on hardware.
+
+  The earlier "I2S bit clock ~16× too slow / ES8311 is clock master" diagnosis
+  was **wrong** and sent debugging down a dead end. A pure-read self-test
+  (`voiceSelfTest`, no render/send/keyboard) measures the hardware I2S rate at
+  ~16 kHz, and ES8311 reg `0x01=0xBA` (MCLK=BCLK) proves the codec is an I2S
+  **slave** clocked by the S3, not the master. Direct `i2s_read()` on
+  M5Unified's port 0 does **not** panic — it reads real samples.
+
+  The real bottleneck was the WebSocket send. `sendFrame` used to mask and write
+  the payload in 128-byte chunks (~80 `tcp_write` calls for a 10 KiB audio
+  frame). Once the lwIP send buffer (~5.7 KiB) filled, each small write stalled
+  on the peer's delayed ACK (~60 ms), so one frame blocked ~4.8 s. That starved
+  the capture loop (the I2S DMA overflowed), which is what made the *loop*
+  throughput look like ~767 Hz — misread as a slow hardware clock.
+
+  Fix: mask the whole frame into a static buffer and send it in **one**
+  `socket_.write()` so lwIP segments and pipelines it. The mask buffer is static,
+  not `malloc`: the heap is fragmented enough that a second ~10 KiB contiguous
+  block fails even with ~76 KiB total free. After the fix a single frame sends in
+  ~24 ms and the Host returns `stt.ready` → `stt`. The `rate:16000` label matches
+  the true steady-state rate; the self-test drains the DMA backlog before
+  measuring so it no longer reports a backlog-inflated ~17.5 kHz.
+
+  Voice is now press-to-talk: `Fn+V` starts, `ENT` (or `Fn+V` again) stops early,
+  with a 20 s hard cap. The capture loop polls the key queue itself because
+  `handlePress` only runs from `loop()`, which is blocked during capture. The RX
+  DMA was deepened from 8×128 to 12×256 samples (~192 ms slack) so the per-block
+  send overhead no longer overflows the FIFO: the loop now sustains ~15.9 kHz
+  (≈ real time) instead of ~14.8 kHz, while the boot low-watermark stays ~24 KiB,
+  clear of the ~19 KiB session-load panic floor.
+- **`Fn+V` shows a live `MIC` level bar** while recording, computed from each
+  captured buffer, so "is the microphone hearing anything" is answerable on the
+  device without a serial cable.
+- LAN only, no TLS; the token is a shared secret stored in NVS.
+- Prompt acceptance is not completion; completion is the `message` + `status`
+  pair.
+- Tool-permission prompts raised by a turn are answered in the Desktop, not on
+  the Cardputer.
+- One Host plugin instance per port; a second install on 9101 reports a listen
+  error instead of crashing.
+- The panel backbuffer is 8 bpp (256 colours). This is deliberate: 16 bpp cost
+  64.8 KiB of heap and session loads used to panic when the heap dipped under
+  ~19 KiB. At 8 bpp the same board shows 97 KiB free / 92 KiB low-watermark.

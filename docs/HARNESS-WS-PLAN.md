@@ -1,6 +1,9 @@
 # HARNESS realtime WebSocket rewrite
 
-Status: design handoff. Use this file when starting a **Creator mode** DSH session.
+Status: **implemented.** The Host plugin (`harness-ws/plugin`) and the rewritten
+firmware are live; see [HARNESS.md](HARNESS.md) for the shipped architecture,
+the protocol, and the verification results. The design notes below are kept as
+the rationale for choosing a Host plugin over the ACP relay.
 
 ## Why the current bridge cannot be realtime
 
@@ -72,6 +75,7 @@ Reference implementation details:
 1. Host plugin is required for truly shared live Session. It is a third-party
    profile bundle and may trigger the DSH safe-mode prompt; Creator mode is the
    supported authoring path, not a security bypass.
-2. Without a Host plugin, use ACP relay only; not realtime.
-3. If the safe-mode prompt cannot be accepted, fall back to a dedicated
-   ACP/SDK profile and clearly label it "relay", not "sync".
+2. ~~Without a Host plugin, use ACP relay only; not realtime.~~ Resolved: the
+   Host plugin shipped, and the ACP relay has since been retired outright.
+3. ~~If the safe-mode prompt cannot be accepted, fall back to a dedicated
+   ACP/SDK profile.~~ Not needed; see HARNESS.md.
