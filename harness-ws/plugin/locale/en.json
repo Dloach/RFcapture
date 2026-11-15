@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Cardputer live sessions",
+    "description": "LAN WebSocket on port 9101 that shares the Desktop's live Sessions with an M5Stack Cardputer: list, open, prompt, stream assistant text, cancel, and voice input.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Cardputer 实时会话",
+    "description": "在 9101 端口提供局域网 WebSocket，把 Desktop 正在使用的同一个会话共享给 M5Stack Cardputer：列表、打开、发送、增量推送回复、取消与语音输入。",
+    "detail": "docs/DETAIL.md"
+  }
+}

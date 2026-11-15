@@ -1,0 +1,11 @@
+- insert:
+    - id: cardputer-ws
+      name: '@local/dsh-cardputer-ws'
+      config:
+        # 9100 is unused: the old ACP/HTTP bridge has been retired.
+        port: 9101
+        path: '/cardputer'
+        token: 'cardputer-dev'
+        workspace: 'Y:\2026\cardputer'
+        sttPython: 'Y:\2026\cardputer\harness-bridge\.venv\Scripts\python.exe'
+        sttModel: 'Y:\2026\cardputer\harness-bridge\models\vosk-model-small-cn-0.22'

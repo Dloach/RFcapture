@@ -1,0 +1,26 @@
+{
+  "name": "@local/dsh-cardputer-ws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LAN WebSocket surface that shares the Desktop's live DSH Sessions with an M5Stack Cardputer",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "ws.js",
+    "stt.py",
+    "cordis.patch.yml",
+    "locale",
+    "docs",
+    "icon.svg"
+  ]
+}
