@@ -258,10 +258,10 @@ def history(session_id: str) -> list[dict]:
             typ = ev.get("type")
             if typ not in ("user/message", "assistant/message"):
                 continue
-            data = ev.get("data", {})
-            content = data.get("content")
+            data_block = ev.get("data", {})
+            content = data_block.get("content")
             if content is None:
-                content = data.get("message", {}).get("content", [])
+                content = data_block.get("message", {}).get("content", [])
             text = "".join(
                 x.get("text", "") for x in content
                 if isinstance(x, dict) and x.get("type") == "text"
@@ -274,6 +274,27 @@ def history(session_id: str) -> list[dict]:
         return out
     except Exception:
         return []
+
+
+def one_line(text: str, limit: int) -> str:
+    text = " ".join(str(text).replace("\r", " ").replace("\n", " ").split())
+    return text[:limit]
+
+
+def session_summary(item: dict) -> dict:
+    sid = item.get("sessionId", "")
+    msgs = history(sid)
+    first_user = next((m["text"] for m in msgs if m["role"] == "user"), "")
+    last = msgs[-1]["text"] if msgs else ""
+    path = find_session_log(sid)
+    updated = int(path.stat().st_mtime * 1000) if path else 0
+    return {
+        "sessionId": sid,
+        "cwd": item.get("cwd", ""),
+        "title": one_line(first_user, 36) or "New session",
+        "preview": one_line(last, 46) or "No messages yet",
+        "updatedAt": updated,
+    }
 
 
 def stt(wav_bytes: bytes) -> str:
@@ -324,7 +345,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth():
                 return
             if u.path == "/cardputer/sessions":
-                return self._json(200, {"sessions": acp().list_sessions()})
+                items = [session_summary(s) for s in acp().list_sessions()]
+                items.sort(key=lambda s: s.get("updatedAt", 0), reverse=True)
+                return self._json(200, {"sessions": items})
             if u.path == "/cardputer/messages":
                 sid = parse_qs(u.query).get("session", [""])[0]
                 if not sid:
