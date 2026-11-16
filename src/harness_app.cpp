@@ -65,7 +65,7 @@ constexpr int      kMaxInput = 300;
 auto& lcd = M5Cardputer.Display;
 M5Canvas canvas;
 
-enum class Screen : uint8_t { kDeck, kChat, kConfig };
+enum class Screen : uint8_t { kDeck, kChat, kPreview, kEdit, kConfig };
 Screen screen = Screen::kDeck;
 bool   dirty  = true;
 
@@ -92,14 +92,21 @@ int deckTop = 0;
 
 String streamText;
 
-// Wrapped transcript, kept as *lines only*.  The raw message list is not
-// retained: on a 320 KiB board two copies of a long chat (raw text + wrapped
-// lines) is what pushed the heap into an abort a few keys later.  Lines are
-// capped and the oldest are dropped, so memory stays flat however long the
-// conversation gets.
-std::vector<String> committedLines;
-std::vector<String> streamLines;
-int  scroll     = 0;
+// Messages are kept as (role, text): the chat list shows one truncated line per
+// message and the full-screen view wraps on demand, so no wrapped copies are
+// retained (keeping both was what pushed the heap into an abort earlier).
+struct ChatMsg {
+    String role;  // "user" | "assistant"
+    String text;
+};
+std::vector<ChatMsg> msgs;
+int      cursor       = 0;   // message index, or msgs.size() == the input row
+int      caret        = 0;   // byte offset into `input`
+int      previewIndex = 0;
+int      previewScroll = 0;      // first visible wrapped line in the preview
+int      previewMaxScroll = 0;   // clamped by drawPreview, used by the keys
+bool     caretOn      = true;
+uint32_t caretAt      = 0;
 uint16_t parseFailures = 0;
 
 bool   running = false;
@@ -209,61 +216,88 @@ void wrapInto(std::vector<String>& out, const String& text, const String& prefix
     if (line.length() > prefix.length()) out.push_back(line);
 }
 
-/// Append a streamed fragment to the tail.  Rebuilding every wrapped line on
-/// each delta churned hundreds of small Strings per second and fragmented the
-/// heap; this only touches the last line.
-void appendStream(const String& delta)
-{
-    if (streamLines.empty()) streamLines.push_back("AI:  ");
-    if (streamText.length() < 8000) streamText += delta;
+// --- chat model: one row per message plus the input row at the bottom --------
+constexpr int kChatRows    = 5;    // message rows; row 6 is the streaming tail
+constexpr int kMaxMsgs     = 24;
+constexpr int kMaxMsgChars = 700;  // per-message cap; a full preview is ~350 chars
 
-    canvas.setFont(&lgfx::fonts::efontCN_12);
-    const int maxWidth = lcd.width() - 6;
-    int i = 0;
-    const int len = static_cast<int>(delta.length());
-    while (i < len) {
-        int n = utf8Len(static_cast<unsigned char>(delta[i]));
-        if (i + n > len) n = len - i;
-        const String part = delta.substring(i, i + n);
-        if (canvas.textWidth(streamLines.back() + part) > maxWidth) {
-            streamLines.push_back("  ");
-            streamLines.back() += part;
-        } else {
-            streamLines.back() += part;
-        }
-        i += n;
-    }
-    canvas.setTextFont(1);
-    if (streamLines.size() > kMaxStreamLines) {
-        streamLines.erase(streamLines.begin(), streamLines.begin() + (streamLines.size() - kMaxStreamLines));
+void chatTrim()
+{
+    while (msgs.size() > static_cast<size_t>(kMaxMsgs)) msgs.erase(msgs.begin());
+    if (cursor > static_cast<int>(msgs.size())) cursor = static_cast<int>(msgs.size());
+    if (previewIndex >= static_cast<int>(msgs.size())) {
+        previewIndex = std::max(0, static_cast<int>(msgs.size()) - 1);
     }
 }
 
-/// Append one message's wrapped text, trimming the oldest lines to stay bounded.
-void appendWrapped(const String& text, const String& prefix)
+void chatAddMessage(const String& role, const String& text)
 {
-    canvas.setFont(&lgfx::fonts::efontCN_12);
-    wrapInto(committedLines, text, prefix, lcd.width() - 6);
-    canvas.setTextFont(1);
-    if (committedLines.size() > kMaxLines) {
-        committedLines.erase(committedLines.begin(), committedLines.begin() + (committedLines.size() - kMaxLines));
-    }
+    ChatMsg m;
+    m.role = role;
+    m.text = truncateUtf8(text, kMaxMsgChars);
+    msgs.push_back(m);
+    chatTrim();
+    cursor = static_cast<int>(msgs.size());  // leave the cursor on the input row
+    markDirty();
 }
 
-int totalLines()
+void chatClear()
 {
-    return static_cast<int>(committedLines.size() + streamLines.size());
+    msgs.clear();
+    streamText  = "";
+    cursor      = 0;
+    caret       = 0;
+    previewIndex = 0;
 }
 
-/// The i-th line of the committed+streaming concatenation, without copying either.
-const String* lineAt(int index)
+/// Move the selection through the message rows and finally onto the input row.
+void moveCursor(int delta)
 {
-    if (index < 0) return nullptr;
-    const int committed = static_cast<int>(committedLines.size());
-    if (index < committed) return &committedLines[index];
-    const int tail = index - committed;
-    if (tail < static_cast<int>(streamLines.size())) return &streamLines[tail];
-    return nullptr;
+    const int last = static_cast<int>(msgs.size());  // the input row
+    cursor += delta;
+    if (cursor < 0) cursor = 0;
+    if (cursor > last) cursor = last;
+    markDirty();
+}
+
+void caretLeft()
+{
+    if (caret <= 0) return;
+    int i = caret - 1;
+    while (i > 0 && (static_cast<unsigned char>(input[i]) & 0xC0) == 0x80) --i;
+    caret = i;
+    caretOn = true;
+    markDirty();
+}
+
+void caretRight()
+{
+    if (caret >= static_cast<int>(input.length())) return;
+    int step = utf8Len(static_cast<unsigned char>(input[caret]));
+    caret += step;
+    if (caret > static_cast<int>(input.length())) caret = input.length();
+    caretOn = true;
+    markDirty();
+}
+
+void inputInsert(const String& text)
+{
+    if (input.length() + text.length() > static_cast<size_t>(kMaxInput)) return;
+    input = input.substring(0, caret) + text + input.substring(caret);
+    caret += text.length();
+    caretOn = true;
+    markDirty();
+}
+
+void inputBackspace()
+{
+    if (caret <= 0) return;
+    int i = caret - 1;
+    while (i > 0 && (static_cast<unsigned char>(input[i]) & 0xC0) == 0x80) --i;
+    input.remove(i, caret - i);
+    caret = i;
+    caretOn = true;
+    markDirty();
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +313,7 @@ void requestSessions()
 void openSession(const String& id)
 {
     sessionId = id;
-    streamText = "";
-    committedLines.clear();
-    streamLines.clear();
-    scroll = 0;
+    chatClear();
     running = false;
     statusText = "LOADING";
     screen = Screen::kChat;
@@ -314,6 +345,7 @@ void sendPrompt()
     frame += "\"}";
     if (ws.sendText(frame)) {
         input = "";
+        caret = 0;
         statusText = "SENT";
     } else {
         statusText = "SEND FAILED";
@@ -357,16 +389,18 @@ void applySessions(JsonArray items)
 
 void applySnapshot(JsonArray messages)
 {
-    committedLines.clear();
-    streamText = "";
-    streamLines.clear();
-    scroll = 0;
+    chatClear();
     for (JsonObject item : messages) {
         const String role = item["role"].as<String>();
         const String text = item["text"].as<String>();
         if (text.isEmpty()) continue;
-        appendWrapped(text, role == "user" ? "You: " : "AI:  ");
+        ChatMsg m;
+        m.role = role == "user" ? "user" : "assistant";
+        m.text = truncateUtf8(text, kMaxMsgChars);
+        msgs.push_back(m);
     }
+    chatTrim();
+    cursor = static_cast<int>(msgs.size());
     statusText = "READY";
     markDirty();
 }
@@ -415,8 +449,8 @@ void handleMessage(const char* json, size_t length)
         applySnapshot(doc["messages"].as<JsonArray>());
     } else if (strcmp(type, "delta") == 0) {
         const char* text = doc["text"] | "";
-        if (text[0] != '\0') {
-            appendStream(String(text));
+        if (text[0] != '\0' && streamText.length() < 4000) {
+            streamText += text;
             markDirty();
         }
     } else if (strcmp(type, "message") == 0) {
@@ -424,13 +458,8 @@ void handleMessage(const char* json, size_t length)
         const char* text = doc["text"] | "";
         if (text[0] != '\0') {
             const bool assistant = strcmp(role, "assistant") == 0;
-            if (assistant) {
-                streamText = "";
-                streamLines.clear();
-            }
-            appendWrapped(String(text), assistant ? "AI:  " : "You: ");
-            if (scroll > 0) ++scroll;
-            markDirty();
+            if (assistant) streamText = "";
+            chatAddMessage(assistant ? "assistant" : "user", String(text));
         }
     } else if (strcmp(type, "status") == 0) {
         running = doc["running"] | false;
@@ -443,7 +472,7 @@ void handleMessage(const char* json, size_t length)
         markDirty();
     } else if (strcmp(type, "stt") == 0) {
         const char* text = doc["text"] | "";
-        if (text[0] != '\0') input += text;
+        if (text[0] != '\0') inputInsert(String(text));  // insert at the caret
         statusText = "VOICE OK";
         voice = Voice::kIdle;
         markDirty();
@@ -461,7 +490,7 @@ void handleMessage(const char* json, size_t length)
     // The two frames that carry bulk text: log the heap after they are applied,
     // so the next crash is measurable rather than a guess.
     if (strcmp(type, "snapshot") == 0 || strcmp(type, "sessions") == 0) {
-        usbLogf("[rx] %s done free=%u lines=%d", type, ESP.getFreeHeap(), totalLines());
+        usbLogf("[rx] %s done free=%u msgs=%d", type, ESP.getFreeHeap(), static_cast<int>(msgs.size()));
     }
 }
 
@@ -607,6 +636,24 @@ bool voiceI2sBegin()
         return false;
     }
     delay(200);
+
+    // M5Unified's Cardputer ADV mic callback leaves the ES8311 front-end at
+    // minimum analog gain (0x14=0x10 PGA 0 dB, 0x17=0xBF ADC 0 dB). A baseline
+    // capture measured peak 3.4 % FS / RMS -58 dBFS — far too quiet for ASR.
+    // Raise the analog PGA to +21 dB and ADC to +6 dB (the front-end M5 uses on
+    // its Stopwatch board) so the signal is amplified BEFORE the ADC, which is
+    // what improves SNR; software gain after the ADC only amplifies noise too.
+    // 0x1C=0x64 enables the dynamic HPF to cut sub-200 Hz rumble.
+    M5.In_I2C.writeRegister8(0x18, 0x14, 0x17, 100000);
+    M5.In_I2C.writeRegister8(0x18, 0x17, 0xCB, 100000);
+    M5.In_I2C.writeRegister8(0x18, 0x1C, 0x64, 100000);
+    uint8_t g14 = 0xEE, g17 = 0xEE, g1c = 0xEE;
+    M5.In_I2C.readRegister(0x18, 0x14, &g14, 1, 100000);
+    M5.In_I2C.readRegister(0x18, 0x17, &g17, 1, 100000);
+    M5.In_I2C.readRegister(0x18, 0x1C, &g1c, 1, 100000);
+    usbLogf("[voice] gain set PGA=0x%02X ADC=0x%02X HPF=0x%02X",
+            static_cast<unsigned>(g14), static_cast<unsigned>(g17), static_cast<unsigned>(g1c));
+
     usbLogf("[voice] speaker=%d codec ready", powered ? 1 : 0);
     voiceDumpCodec();
 
@@ -631,11 +678,15 @@ size_t voiceRead(int16_t* buffer, size_t samples, uint32_t timeoutMs)
     return bytesRead / sizeof(int16_t);
 }
 
-/// +6 dB, soft-limit the peaks (as Hermes does) and track the peak for the log.
+/// Unity software gain + soft-limit, tracking the peak for the log. The analog
+/// PGA (+21 dB) and ADC (+6 dB) now amplify BEFORE the converter, so the signal
+/// already arrives at a healthy level; multiplying here again would only stack
+/// gain and drive the soft-limiter into distortion. Keep the limiter as a safety
+/// net for loud speech.
 void voiceCondition(int16_t* buffer, size_t count, int32_t& peak)
 {
     for (size_t i = 0; i < count; ++i) {
-        int32_t value   = static_cast<int32_t>(buffer[i]) * 2;
+        int32_t value   = static_cast<int32_t>(buffer[i]);
         const bool negative = value < 0;
         int32_t magnitude = negative ? -value : value;
         if (magnitude > 24500) magnitude = 24500 + (magnitude - 24500) / 4;
@@ -654,7 +705,12 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
         g_micUp = true;
     }
 
-    ws.sendText(String("{\"type\":\"stt.begin\",\"rate\":") + kVoiceRate +
+    // Declare the rate the hardware actually produces, not the nominal 16000:
+    // the capture loop measures ~14.8 kHz, and telling Vosk 16 kHz makes speech
+    // play ~8% fast, which costs recognition accuracy.
+    const uint32_t declaredRate =
+        (voiceHwHz >= 8000 && voiceHwHz <= 48000) ? voiceHwHz : kVoiceRate;
+    ws.sendText(String("{\"type\":\"stt.begin\",\"rate\":") + String(declaredRate) +
                 ",\"channels\":1,\"bits\":16}");
 
     voiceLevel = 0;
@@ -714,6 +770,16 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
                     static_cast<unsigned>(voiceLevel));
         }
         if (stop) break;
+    }
+
+    // Silence gate: SenseVoice happily invents a sentence for an empty clip
+    // (a 1 s silent WAV transcribes to "没。"), so a capture whose loudest sample
+    // never rises above room noise is dropped instead of transcribed.
+    if (peak < 600) {
+        ws.sendText("{\"type\":\"stt.abort\"}");
+        usbLogf("[voice] silent (peak=%d), skipped", static_cast<int>(peak));
+        lastError = "no speech";
+        return false;
     }
 
     ws.sendText("{\"type\":\"stt.end\"}");
@@ -776,13 +842,10 @@ void deckEnsureVisible()
 
 void scrollBy(int delta)
 {
-    const int total = totalLines();
-    const int visible = 6;
-    const int maxScroll = std::max(0, total - visible);
-    scroll += delta;
-    if (scroll < 0) scroll = 0;
-    if (scroll > maxScroll) scroll = maxScroll;
-    markDirty();
+    // Kept as a name for the deck's list paging; the chat now navigates a cursor.
+    const int total = static_cast<int>(msgs.size());
+    (void)total;
+    moveCursor(delta);
 }
 
 void openSelected()
@@ -913,16 +976,60 @@ void handlePress(Point2D_t point)
         return;
     }
 
-    // Chat.
-    if (c == KEY_ENTER) {
-        sendPrompt();
+    // Full-screen preview of one message: the whole screen is the content.
+    // esc / ENT / space returns, up/down scroll the text.
+    if (screen == Screen::kPreview) {
+        if (c == '`' || c == KEY_ENTER || c == ' ') {
+            screen = Screen::kChat;
+            markDirty();
+            return;
+        }
+        if (c == ';') {
+            if (previewScroll > 0) --previewScroll;
+            markDirty();
+            return;
+        }
+        if (c == '.') {
+            if (previewScroll < previewMaxScroll) ++previewScroll;
+            markDirty();
+            return;
+        }
+        if (c == ',') { previewScroll = 0; markDirty(); return; }              // top
+        if (c == '/') { previewScroll = previewMaxScroll; markDirty(); return; }  // bottom
         return;
     }
-    if (c == KEY_BACKSPACE) {
-        deleteLastUtf8(input);
-        markDirty();
+
+    // Full-screen editor for the message being composed.
+    if (screen == Screen::kEdit) {
+        if (c == '`') {
+            screen = Screen::kChat;
+            markDirty();
+            return;
+        }
+        if (c == KEY_ENTER) {
+            screen = Screen::kChat;
+            sendPrompt();
+            return;
+        }
+        if (c == KEY_BACKSPACE) {
+            inputBackspace();
+            return;
+        }
+        if (fn && (c == 'v' || c == 'V')) {
+            voiceStart();
+            return;
+        }
+        if (c == ',') { caretLeft(); return; }
+        if (c == '/') { caretRight(); return; }
+        if (c >= 32 && c < 127) {
+            inputInsert(String(c));
+            return;
+        }
         return;
     }
+
+    // Chat: the cursor selects a message (ENTER opens it full screen) or sits on
+    // the input row (typing edits it, ENTER sends). Left/right move the caret.
     if (c == '`') {
         screen = Screen::kDeck;
         requestSessions();
@@ -931,6 +1038,11 @@ void handlePress(Point2D_t point)
     }
     if (fn) {
         if (c == 'v' || c == 'V') { voiceStart(); return; }
+        if (c == KEY_ENTER) {  // full-screen editor
+            screen = Screen::kEdit;
+            markDirty();
+            return;
+        }
         if (c == 's' || c == 'S') {
             screen = Screen::kDeck;
             requestSessions();
@@ -945,16 +1057,41 @@ void handlePress(Point2D_t point)
             markDirty();
             return;
         }
-        if (c == ';' || c == ',' || c == '[') { scrollBy(3); return; }
-        if (c == '.' || c == '/' || c == ']') { scrollBy(-3); return; }
         if (c == 'x' || c == 'X') { sendCancel(); return; }
         return;
     }
-    if (c == ';' || c == ',') { scrollBy(3); return; }
-    if (c == '.' || c == '/') { scrollBy(-3); return; }
+
+    const bool onInput = cursor >= static_cast<int>(msgs.size());
+    if (c == KEY_ENTER) {
+        if (onInput) {
+            sendPrompt();
+        } else if (cursor >= 0 && cursor < static_cast<int>(msgs.size())) {
+            previewIndex  = cursor;
+            previewScroll = 0;
+            screen        = Screen::kPreview;
+            markDirty();
+        }
+        return;
+    }
+    if (c == KEY_BACKSPACE) {
+        if (!onInput) cursor = static_cast<int>(msgs.size());
+        inputBackspace();
+        return;
+    }
+    if (c == ';') { moveCursor(-1); return; }  // up
+    if (c == '.') { moveCursor(+1); return; }  // down
+    if (c == ',') {
+        if (onInput) caretLeft();
+        return;
+    }
+    if (c == '/') {
+        if (onInput) caretRight();
+        return;
+    }
     if (c >= 32 && c < 127) {
-        if (input.length() < kMaxInput) input += c;
-        markDirty();
+        if (!onInput) cursor = static_cast<int>(msgs.size());
+        inputInsert(String(c));
+        return;
     }
 }
 
@@ -1060,13 +1197,9 @@ void drawChat()
         canvas.drawRect(88, 16, 86, 8, kDim);
         const int width = static_cast<int>(voiceLevel) * 82 / 100;
         if (width > 0) canvas.fillRect(90, 18, width, 4, voiceLevel > 85 ? kWarn : kOk);
-        // Hardware I2S rate from the pure-read self-test — the decisive number.
-        // ~16k means the bit clock is fine and any shortfall in the capture loop
-        // is starvation, not a clock fault.
         const bool hwOk = voiceHwHz >= 15000 && voiceHwHz <= 17500;
         canvas.setTextColor(hwOk ? kOk : kWarn, kBg);
-        canvas.drawRightString("H" + String(voiceHwHz / 1000) + "k",
-                               lcd.width() - 34, 15);
+        canvas.drawRightString("H" + String(voiceHwHz / 1000) + "k", lcd.width() - 34, 15);
     }
     canvas.setTextColor(kDim, kBg);
     String label = sessionId;
@@ -1075,50 +1208,145 @@ void drawChat()
     }
     canvas.drawRightString(label, lcd.width() - 3, 15);
 
-    canvas.setFont(&lgfx::fonts::efontCN_12);
-    canvas.setTextColor(kText, kBg);
-    const int lineH   = 12;
-    const int visible = 6;
-    const int total   = totalLines();
-    int first = total - visible - scroll;
-    if (first < 0) first = 0;
-    int y = 26;
-    // Rendering with a nearly exhausted heap is how a key press turned into a
-    // reboot; say so instead.
-    if (ESP.getFreeHeap() < 9000) {
-        canvas.setTextColor(kWarn, kBg);
-        canvas.drawString("LOW MEM", 3, 30);
-    } else {
-        for (int i = first; i < total && i < first + visible; ++i) {
-            const String* line = lineAt(i);
-            if (line != nullptr) canvas.drawString(*line, 3, y);
-            y += lineH;
-        }
+    // One truncated row per message. The selection window follows the cursor.
+    int top = cursor - kChatRows + 1;
+    if (top > static_cast<int>(msgs.size()) - kChatRows) {
+        top = static_cast<int>(msgs.size()) - kChatRows;
     }
-    if (total == 0) {
+    if (top < 0) top = 0;
+
+    canvas.setFont(&lgfx::fonts::efontCN_12);
+    const int rowH = 12;
+    if (msgs.empty() && streamText.isEmpty()) {
         canvas.setTextColor(kDim, kBg);
-        canvas.drawString(ws.open() ? "No messages here yet." : "Reconnecting...", 3, 30);
+        canvas.drawString(ws.open() ? "No messages here yet." : "Reconnecting...", 3, 28);
+    }
+    for (int r = 0; r < kChatRows; ++r) {
+        const int idx = top + r;
+        if (idx >= static_cast<int>(msgs.size())) break;
+        const int  y   = 26 + r * rowH;
+        const bool sel = idx == cursor;
+        if (sel) canvas.fillRect(0, y - 1, lcd.width(), rowH, kBar);
+        canvas.setTextColor(sel ? kAccent : kText, sel ? kBar : kBg);
+        const String prefix = msgs[idx].role == "user" ? "You " : "AI  ";
+        canvas.drawString(prefix + truncateUtf8(msgs[idx].text, 30), 3, y);
+    }
+    // Live streaming tail, one line, not selectable. Sits in the row directly
+    // above the input separator.
+    if (!streamText.isEmpty()) {
+        canvas.setTextColor(kDim, kBg);
+        canvas.drawString("AI  " + truncateUtf8(streamText, 30), 3, 26 + kChatRows * rowH);
     }
     canvas.setTextFont(1);
 
-    canvas.drawFastHLine(0, 101, lcd.width(), kDim);
-    canvas.fillRect(0, 103, lcd.width(), 14, kBg);
+    // Input row: highlighted when the cursor is on it, with a blinking caret.
+    const bool onInput = cursor >= static_cast<int>(msgs.size());
+    const int  inputY  = 101;
+    canvas.drawFastHLine(0, inputY - 3, lcd.width(), kDim);
+    if (onInput) canvas.fillRect(0, inputY - 1, lcd.width(), 13, kBar);
     canvas.setFont(&lgfx::fonts::efontCN_12);
-    canvas.setTextColor(kAccent, kBg);
-    String shown = input.isEmpty() ? String("> ") : ("> " + input);
-    // Keep the "> " prefix while dropping characters off the left of the text.
-    while (canvas.textWidth(shown) > lcd.width() - 6 && shown.length() > 3) shown.remove(2, 1);
-    canvas.drawString(shown, 3, 103);
+    // Keep the caret visible: drop leading characters until the prefix fits.
+    String pre = input.substring(0, caret);
+    while (canvas.textWidth("> " + pre) > lcd.width() - 16 && pre.length() > 0) {
+        int step = utf8Len(static_cast<unsigned char>(pre[0]));
+        if (step > static_cast<int>(pre.length())) step = pre.length();
+        pre.remove(0, step);
+    }
+    const int caretX = 3 + canvas.textWidth("> " + pre);
+    canvas.setTextColor(onInput ? kText : kDim, onInput ? kBar : kBg);
+    canvas.drawString("> " + pre + input.substring(caret), 3, inputY);
+    if (onInput && caretOn) canvas.drawFastVLine(caretX, inputY, 11, kAccent);
     canvas.setTextFont(1);
 
-    if (scroll > 0) {
-        canvas.setTextColor(kAccent, kBg);
-        canvas.drawRightString("^", lcd.width() - 4, 16);
+    static const char* const keys[]   = {"ENT", "FnENT", "FnV", "FnX", "esc"};
+    static const char* const labels[] = {"open/send", "edit", "voice", "stop", "back"};
+    drawHints(keys, labels, 5);
+}
+
+/// Full-screen reading view: no header, no footer, maximum content per screen.
+void drawPreview()
+{
+    canvas.fillScreen(kBg);
+    if (msgs.empty() || previewIndex < 0 || previewIndex >= static_cast<int>(msgs.size())) {
+        canvas.setTextFont(1);
+        canvas.setTextColor(kWarn, kBg);
+        canvas.drawString("no message", 4, 60);
+        return;
+    }
+    std::vector<String> lines;
+    canvas.setFont(&lgfx::fonts::efontCN_12);
+    wrapInto(lines, msgs[previewIndex].text, "", lcd.width() - 6);
+
+    const int lineH = 12;
+    const int topY  = 2;
+    const int bottomY = lcd.height() - 12;
+    int visible = (bottomY - topY) / lineH;
+    if (visible < 1) visible = 1;
+    int maxScroll = static_cast<int>(lines.size()) - visible;
+    if (maxScroll < 0) maxScroll = 0;
+    previewMaxScroll = maxScroll;
+    if (previewScroll > maxScroll) previewScroll = maxScroll;
+    if (previewScroll < 0) previewScroll = 0;
+
+    canvas.setTextColor(kText, kBg);
+    int y = topY;
+    for (int i = previewScroll; i < static_cast<int>(lines.size()) && y < bottomY; ++i) {
+        canvas.drawString(lines[i], 3, y);
+        y += lineH;
     }
 
-    static const char* const keys[]   = {"ENT", "FnV", "Fn;.", "FnS", "esc"};
-    static const char* const labels[] = {"send", "voice", "scroll", "list", "back"};
-    drawHints(keys, labels, 5);
+    canvas.setTextFont(1);
+    canvas.setTextColor(kDim, kBg);
+    if (maxScroll > 0) {
+        const int page = previewScroll / visible + 1;
+        const int pages = maxScroll / visible + 1;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d/%d ;. scroll", page, pages);
+        canvas.drawString(buf, 3, lcd.height() - 10);
+    } else {
+        canvas.drawString("esc", 3, lcd.height() - 10);
+    }
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawRightString("esc", lcd.width() - 3, lcd.height() - 10);
+}
+
+/// Full-screen composer: same content area as the preview, with the caret.
+void drawEdit()
+{
+    canvas.fillScreen(kBg);
+    std::vector<String> lines;
+    canvas.setFont(&lgfx::fonts::efontCN_12);
+    wrapInto(lines, input, "", lcd.width() - 6);
+    canvas.setTextColor(kText, kBg);
+    const int lineH = 12;
+    int y = 2;
+    for (size_t i = 0; i < lines.size() && y < lcd.height() - 14; ++i) {
+        canvas.drawString(lines[i], 3, y);
+        y += lineH;
+    }
+    // The caret belongs at the end of the wrapped prefix, which is exact for a
+    // left-to-right wrapper.
+    std::vector<String> preLines;
+    wrapInto(preLines, input.substring(0, caret), "", lcd.width() - 6);
+    const int caretLine = preLines.empty() ? 0 : static_cast<int>(preLines.size()) - 1;
+    const int caretX = 3 + (preLines.empty() ? 0 : canvas.textWidth(preLines.back()));
+    if (caretOn) canvas.drawFastVLine(caretX, 2 + caretLine * lineH, 11, kAccent);
+
+    canvas.setTextFont(1);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawFastHLine(0, lcd.height() - 12, lcd.width(), kDim);
+    canvas.setTextColor(kOk, kBg);
+    canvas.drawString("ENT", 3, lcd.height() - 10);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("send", 22, lcd.height() - 10);
+    canvas.setTextColor(kOk, kBg);
+    canvas.drawString("esc", 58, lcd.height() - 10);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("back", 78, lcd.height() - 10);
+    canvas.setTextColor(kOk, kBg);
+    canvas.drawString("FnV", 108, lcd.height() - 10);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("voice", 128, lcd.height() - 10);
 }
 
 void drawConfig()
@@ -1151,6 +1379,8 @@ void render()
     switch (screen) {
         case Screen::kDeck: drawDeck(); break;
         case Screen::kChat: drawChat(); break;
+        case Screen::kPreview: drawPreview(); break;
+        case Screen::kEdit: drawEdit(); break;
         case Screen::kConfig: drawConfig(); break;
     }
     canvas.pushSprite(&lcd, 0, 0);
@@ -1308,8 +1538,8 @@ void loop()
     static uint32_t lastMemLog = 0;
     if (millis() - lastMemLog > 5000) {
         lastMemLog = millis();
-        usbLogf("[mem] free=%u min=%u lines=%d bad=%u reset=%d hw=%u", ESP.getFreeHeap(),
-                ESP.getMinFreeHeap(), totalLines(), static_cast<unsigned>(parseFailures),
+        usbLogf("[mem] free=%u min=%u msgs=%d bad=%u reset=%d hw=%u", ESP.getFreeHeap(),
+                ESP.getMinFreeHeap(), static_cast<int>(msgs.size()), static_cast<unsigned>(parseFailures),
                 static_cast<int>(esp_reset_reason()), static_cast<unsigned>(voiceHwHz));
     }
 
@@ -1322,19 +1552,26 @@ void loop()
     ws.loop();
 
     // One-shot mic self-test as soon as the link is up: brings the codec up and
-    // measures the true hardware I2S rate with pure reads, logging [voice]
-    // SELFTEST. No key press and no speech needed to capture the evidence.
+    // measures the true hardware I2S rate with pure reads. Deliberately NOT a
+    // capture: sending audio here would transcribe room noise into the composer
+    // on every boot.
     static bool selfTestDone = false;
     if (!selfTestDone && ws.open()) {
         selfTestDone = true;
         if (!g_micUp) g_micUp = voiceI2sBegin();
-        // One instrumented capture (silence is fine) to log per-stage timing:
-        // read vs WS send vs render vs keyboard, so the starvation culprit is
-        // measured, not guessed. No speech needed.
-        if (g_micUp) voiceCapture(2500, false);
+        if (g_micUp) voiceSelfTest();
     }
 
     voiceService();
+
+    // Blink the composer caret.
+    if (screen == Screen::kChat || screen == Screen::kEdit) {
+        if (millis() - caretAt > 500) {
+            caretAt = millis();
+            caretOn = !caretOn;
+            markDirty();
+        }
+    }
 
     if (dirty) render();
     delay(2);

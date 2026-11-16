@@ -173,15 +173,48 @@ There is no rollback path any more, by request. What was retired:
 - `run-standalone.ps1` and `standalone.py` are still on disk but are not
   started by anything.
 
-`harness-bridge/` itself must stay: the plugin's voice input still uses
-`harness-bridge/.venv` (Vosk Python) and
-`harness-bridge/models/vosk-model-small-cn-0.22`.
+`harness-bridge/` itself must stay: the plugin's voice input runs that venv's
+Python (`harness-bridge/.venv`). The recognition engine and its model are chosen
+by the plugin's `sttModel` config, not by that directory.
 
 ## Known limits
 
 - **Voice (`Fn+V`) works end-to-end.** Capture → base64 `stt.chunk` streaming →
-  WAV on the Host → offline Vosk → text into the input line. Short Chinese
-  phrases are recognised on hardware.
+  WAV on the Host → offline speech recognition → text into the input line.
+  Chinese phrases are recognised on hardware, including full sentences.
+
+  **Recognition engine: sherpa-onnx SenseVoice (int8)**, which replaced Vosk
+  small-cn because the small Vosk model garbled ordinary sentences. `stt.py`
+  picks the engine from the model directory, so switching back is a config
+  change only:
+
+  - model dir containing `model.int8.onnx` → SenseVoice
+    (`use_itn=True`, so output carries punctuation);
+  - otherwise → Vosk `KaldiRecognizer`.
+
+  Current config: `sttModel` points at
+  `C:\Users\dloach\cardputer-models\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`
+  (228 MB `model.int8.onnx` + `tokens.txt`), `sherpa_onnx` 2.0.1 in the venv, and
+  one utterance transcribes in ~1.8 s including model load.
+
+  **Silence gate:** SenseVoice invents a sentence for an empty clip (a 1 s silent
+  WAV transcribes to "没。"), so a capture whose loudest sample never exceeds 600
+  is aborted on the device (`stt.abort`, status `VOICE FAILED`) instead of being
+  transcribed.
+
+  **Diagnosis without speaking:** the plugin keeps every capture under
+  `sttCaptureDir` (default `stt-capture/` next to the installed plugin, i.e.
+  `C:\Users\dloach\cardputer-ws\stt-capture`), and
+  `harness-ws/test/stt-analyze.py` reports signal stats and re-transcribes the
+  same WAV with a chosen engine. A real 7.2 s capture measured:
+
+  ```text
+  peak 17719 (54.1% FS) · rms 382 (-38.7 dBFS) · dc -0.5 · clipping none · snr ~28 dB
+  sensevoice: 今天天气怎么样？一直下雨，一直下雨，我觉得不太舒服。
+  ```
+
+  Usage: `python stt-analyze.py <wav> --stats-only` or
+  `--engine sensevoice --model <dir>`.
 
   The earlier "I2S bit clock ~16× too slow / ES8311 is clock master" diagnosis
   was **wrong** and sent debugging down a dead end. A pure-read self-test

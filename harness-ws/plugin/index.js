@@ -16,7 +16,7 @@
  */
 import http from 'node:http'
 import { spawn } from 'node:child_process'
-import { appendFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,6 +39,7 @@ const DEFAULTS = {
   sttPython: '',
   sttScript: join(HERE, 'stt.py'),
   sttModel: '',
+  sttCaptureDir: join(HERE, 'stt-capture'),
   logFile: join(tmpdir(), 'dsh-cardputer-ws.log'),
 }
 
@@ -653,6 +654,20 @@ export function apply(ctx, config) {
           resolve({ error: `stt write: ${String((error && error.message) || error)}` })
           return
         }
+        // Keep a persistent copy of every capture (the temp file above is
+        // deleted after transcribe) so gain/model diagnosis can run offline on
+        // the exact audio the device sent, without re-recording.
+        if (cfg.sttCaptureDir) {
+          try {
+            mkdirSync(cfg.sttCaptureDir, { recursive: true })
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+            const keep = join(cfg.sttCaptureDir, `stt-${stamp}.wav`)
+            writeFileSync(keep, wav)
+            log.info(`stt capture ${keep} bytes=${wav.length} rate=${rate}`)
+          } catch (error) {
+            log.warn(`stt capture save failed: ${String((error && error.message) || error)}`)
+          }
+        }
         const cleanup = () => {
           try {
             unlinkSync(file)
@@ -705,6 +720,44 @@ export function apply(ctx, config) {
         })
       })
     },
+  }
+
+  // --- narrow-screen prompt context -----------------------------------------
+  // While a Cardputer is connected, the model is told how that screen renders
+  // its answers: one truncated line per message in the list, full text only in a
+  // 240x135 full-screen view with no wrapping help. Without this the model emits
+  // tables and wide ASCII layouts that are readable on the Desktop and garbled on
+  // the device. The context is registered only while a device is attached, so a
+  // Desktop-only session is untouched.
+  const NARROW_NOTICE = [
+    '本次对话同时显示在一台 M5Stack Cardputer 上：屏幕 240x135，中文单行约 30 字。',
+    '设备端的消息列表每条只显示一行摘要，其余内容要点进全屏预览才能读，所以：',
+    '- 开头先用一句话给出不超过 30 字的结论；',
+    '- 正文用短段落，每行尽量不超过 30 字，避免长表格；',
+    '- 必须用表格时最多 4 列且每格极短，否则改用“字段: 值”逐行列出；',
+    '- 不要使用宽 ASCII 图、多列对齐、进度条等依赖等宽对齐的排版。',
+  ].join('\n')
+
+  const promptApi = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : undefined
+  let narrowContextDispose = null
+  const syncNarrowPrompt = () => {
+    const wanted = clients.size > 0 && promptApi && typeof promptApi.context === 'function'
+    try {
+      if (wanted && narrowContextDispose === null) {
+        narrowContextDispose = promptApi.context({
+          name: 'cardputer-narrow-screen',
+          order: 900,
+          text: NARROW_NOTICE,
+        })
+        log.info('narrow-screen prompt context registered')
+      } else if (!wanted && narrowContextDispose !== null) {
+        narrowContextDispose()
+        narrowContextDispose = null
+        log.info('narrow-screen prompt context released')
+      }
+    } catch (error) {
+      log.warn(`narrow-screen prompt: ${String((error && error.message) || error)}`)
+    }
   }
 
   const server = http.createServer((request, response) => {
@@ -772,8 +825,10 @@ export function apply(ctx, config) {
         clients.delete(client)
         client.dispose()
         log.info(`client gone ${connection.meta.remoteAddress ?? '?'} total=${clients.size}`)
+        syncNarrowPrompt()
       }
       log.info(`client connected ${connection.meta.remoteAddress ?? '?'} total=${clients.size}`)
+      syncNarrowPrompt()
     },
   })
 
@@ -797,6 +852,12 @@ export function apply(ctx, config) {
         } catch {}
       }
       cleanups.clear()
+      if (narrowContextDispose !== null) {
+        try {
+          narrowContextDispose()
+        } catch {}
+        narrowContextDispose = null
+      }
       try {
         server.close()
       } catch {}

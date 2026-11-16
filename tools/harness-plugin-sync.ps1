@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 if (-not (Test-Path $Source)) { throw "source not found: $Source" }
 
 New-Item -ItemType Directory -Force -Path $Installed | Out-Null
-robocopy $Source $Installed /MIR /XD node_modules /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $Source $Installed /MIR /XD node_modules stt-capture /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with $LASTEXITCODE" }
 
 Write-Host "synced $Source -> $Installed"

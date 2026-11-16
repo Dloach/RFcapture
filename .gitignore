@@ -38,3 +38,12 @@ docs/flash-*.log
 docs/rec-serial.log
 docs/standalone.*
 harness-bridge/__pycache__/
+
+# Captured voice WAVs kept by the Host plugin for offline gain/model diagnosis.
+# Real recordings — never commit (public repo, privacy).
+harness-ws/plugin/stt-capture/
+
+# Machine-specific Windows shortcuts (absolute paths, one-off toggles).
+harness-bridge/*.lnk
+# Python bytecode from the syntax checks.
+__pycache__/

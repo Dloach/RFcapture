@@ -8,4 +8,7 @@
         token: 'cardputer-dev'
         workspace: 'Y:\2026\cardputer'
         sttPython: 'Y:\2026\cardputer\harness-bridge\.venv\Scripts\python.exe'
-        sttModel: 'Y:\2026\cardputer\harness-bridge\models\vosk-model-small-cn-0.22'
+        # SenseVoice (sherpa-onnx int8) on local disk: far higher Chinese accuracy
+        # than the old Vosk small-cn and robust to quiet mic audio. stt.py picks
+        # the engine from the model dir (model.int8.onnx -> SenseVoice).
+        sttModel: 'C:\Users\dloach\cardputer-models\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17'
