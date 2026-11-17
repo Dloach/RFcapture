@@ -196,29 +196,37 @@ void header()
     lcd.drawRightString(b, lcd.width() - 3, 2);
 }
 
+const int gx = 38;
+const int gy = 24;
+const int cw = 11;
+const int ch = 9;
+
+// One grid cell.  During playback only the two changed columns are repainted
+// through this — a full fillScreen every step (twice a second at 120 BPM)
+// made the whole screen flicker.
+void drawCell(int t, int s)
+{
+    const int x = gx + s * cw;
+    const int y = gy + t * ch;
+    const bool on = patterns[t] & (1u << s);
+    const bool playingHere = playing && s == playStep;
+    uint16_t fill = on ? (playingHere ? kOk : kAccent) : (playingHere ? kBar : 0x0841);
+    lcd.fillRect(x, y, cw - 1, ch - 1, fill);
+    // Cursor ring sits in the 1 px gutter around the cell; repaint it either
+    // with the cursor colour or with the background to erase a stale ring.
+    lcd.drawRect(x - 1, y - 1, cw + 1, ch + 1, (t == track && s == step) ? kRed : kBg);
+}
+
 void draw()
 {
     lcd.fillScreen(kBg);
     header();
     lcd.setTextFont(1);
-    const int gx = 38;
-    const int gy = 24;
-    const int cw = 11;
-    const int ch = 9;
     for (int t = 0; t < kTracks; ++t) {
         const int y = gy + t * ch;
         lcd.setTextColor((muted & (1u << t)) ? kDim : kText, kBg);
         lcd.drawString(kNames[t], 2, y);
-        for (int s = 0; s < kSteps; ++s) {
-            const int x = gx + s * cw;
-            const bool on = patterns[t] & (1u << s);
-            const bool playingHere = playing && s == playStep;
-            uint16_t fill = on ? (playingHere ? kOk : kAccent) : (playingHere ? kBar : 0x0841);
-            lcd.fillRect(x, y, cw - 1, ch - 1, fill);
-            if (t == track && s == step) {
-                lcd.drawRect(x - 1, y - 1, cw + 1, ch + 1, kRed);
-            }
-        }
+        for (int s = 0; s < kSteps; ++s) drawCell(t, s);
     }
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("step ", 2, 108);
@@ -264,13 +272,18 @@ void tickAudio()
     renderStep(s);
     M5.Speaker.stop();
     M5.Speaker.playRaw(stepBuf, stepSamples, kRate, false);
+    const int prev = playStep;
     playStep = (playStep + 1) % kSteps;
     const uint32_t stepMs = 60000u / bpm / 4u;
     nextStepMs += stepMs;
     if (static_cast<int32_t>(now - nextStepMs) > static_cast<int32_t>(stepMs)) {
         nextStepMs = now + stepMs;
     }
-    dirty = true;
+    // Repaint only the two affected columns; a full redraw per step flickers.
+    for (int t = 0; t < kTracks; ++t) {
+        drawCell(t, prev);
+        drawCell(t, playStep);
+    }
 }
 
 void handle()
@@ -299,10 +312,12 @@ void handle()
         togglePlay();
         return;
     }
-    if (c == ';' && step > 0) { --step; dirty = true; return; }
-    if (c == '.' && step + 1 < kSteps) { ++step; dirty = true; return; }
-    if (c == ',' && track > 0) { --track; dirty = true; return; }
-    if (c == '/' && track + 1 < kTracks) { ++track; dirty = true; return; }
+    // Arrow legends on the keycaps: ';'=up '.'=down ','=left '/'=right.
+    // Steps run horizontally, tracks vertically — do not swap the axes.
+    if (c == ',' && step > 0) { --step; dirty = true; return; }
+    if (c == '/' && step + 1 < kSteps) { ++step; dirty = true; return; }
+    if (c == ';' && track > 0) { --track; dirty = true; return; }
+    if (c == '.' && track + 1 < kTracks) { ++track; dirty = true; return; }
     if (c == '=') { bpm = std::min(220, bpm + 5); save(); dirty = true; return; }
     if (c == '-') { bpm = std::max(60, bpm - 5); save(); dirty = true; return; }
     if (c == 'm' || c == 'M') {
