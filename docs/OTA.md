@@ -1,53 +1,50 @@
-# 远程 OTA
+# 无线烧录（OTA）
 
-固件使用 ArduinoOTA over WiFi。分区表 `default_8MB.csv` 自带双 app 分区：
+固件使用 ESP32 的 **ArduinoOTA**，走 WiFi。分区表 `default_8MB.csv` 自带双 OTA：
 
 ```text
-app0   3.3 MB
-app1   3.3 MB
+app0  3.3 MB
+app1  3.3 MB
 spiffs 1.5 MB
 ```
 
-OTA 只更新 app 分区，NVS / SPIFFS / WiFi 凭据保留。当前固件约 2.4 MB。
+当前固件约 2 MB，OTA 槽放得下。OTA 只更新 app 分区，**NVS / SPIFFS / WiFi 凭据保留**。
 
-## 常驻 OTA
+## 第一次必须 USB
 
-从本版开始，除 SETTINGS 页面外，任意 app 启动后都会：
-
-1. 读取已保存 WiFi；
-2. 异步连接；
-3. 自动启动 ArduinoOTA（host `cardputer`，端口 3232，密码 `cardputer-ota`）；
-4. 主循环持续 `ArduinoOTA.handle()`。
-
-所以不需要停在 `SETTINGS → OTA UPDATE` 页面。launcher、HARNESS、DRUM、
-RECORDER 等 app 都可以被远程烧录。
-
-SETTINGS 的 OTA 页面仍保留独立生命周期，用于现场查看 IP/进度；在这页里
-退出会 `ArduinoOTA.end()`，这是旧行为。
-
-## 第一次仍要 USB
-
-OTA 服务本身要先通过 USB 烧录一次：
+OTA 服务本身要先有一次 USB 烧录：
 
 ```powershell
 pio run -e cardputer-adv -t upload --upload-port COM13
 ```
 
+## 设备端
+
+1. launcher → **SETTINGS**；
+2. 选 **OTA UPDATE**，`ENT`；
+3. 页面应显示：
+   - `WIFI CONNECTED`
+   - 本机 IP（例如 `192.168.1.42`）
+   - `HOST cardputer.local`
+   - `PORT 3232`
+   - `AUTH ON`
+4. **保持这个页面打开**；离开页面会 `ArduinoOTA.end()`，上传会中断。
+
 ## 电脑端
 
-拿到设备 IP（路由器 DHCP 或 SETTINGS 页面）后：
+优先用设备屏幕上的 IP：
 
 ```powershell
-pio run -e cardputer-ota -t upload --upload-port 192.168.0.74
+pio run -e cardputer-ota -t upload --upload-port 192.168.1.42
 ```
 
-mDNS 可用时：
+mDNS 能解析时也可以：
 
 ```powershell
 pio run -e cardputer-ota -t upload --upload-port cardputer.local
 ```
 
-环境定义：
+`cardputer-ota` 环境定义在 `platformio.ini`：
 
 ```ini
 upload_protocol = espota
@@ -55,15 +52,36 @@ upload_port = cardputer.local
 upload_flags = --auth=cardputer-ota
 ```
 
-## 修改密码
+## 认证密码
 
-同时修改：
+当前默认：
 
-- `src/ota_service.cpp` 的 `kPassword`；
-- `src/settings_app.cpp` 的 `kOtaPassword`；
-- `platformio.ini` 的 `--auth=...`。
+```text
+cardputer-ota
+```
+
+要改密码，同时修改两处：
+
+- `src/settings_app.cpp` 的 `kOtaPassword`
+- `platformio.ini` 的 `--auth=...`
+
+## 页面状态
+
+- `WAITING FOR WIFI`：WiFi 还没连上；
+- `READY`：服务已启动，可以上传；
+- `UPLOADING` + 进度条：正在写 app1/app0；
+- `DONE - REBOOTING`：写完自动重启；
+- `ERROR n`：OTA 错误，看串口/PlatformIO 输出。
+
+## 故障排查
+
+- **`pio` 找不到 cardputer.local**：用屏幕 IP；Windows mDNS 不稳定。
+- **连接被拒绝**：确认设备仍停在 OTA UPDATE 页，且 IP 没变。
+- **auth failed**：密码不一致，检查上面两处。
+- **上传中断**：不要离开页面、不要断电；重新进入 OTA 页再试。
+- **新固件起不来**：G0 + USB 重新烧 `cardputer-adv` 即可，OTA 不会覆盖 NVS/SPIFFS。
+- **OTA 不是 RF/NFC 模式**：OTA 页面属于 SETTINGS，射频/读卡功能此时未初始化。
 
 ## 安全
 
-OTA 只在可信局域网使用；密码是共享口令，不是强认证。不要把 3232 端口
-直接暴露到公网。远程跨网访问应走 VPN/Tailscale，不要做公网端口转发。
+OTA 只应在可信局域网使用；密码是简单共享口令，不是强认证。不要在公共 WiFi 打开 OTA 页面。

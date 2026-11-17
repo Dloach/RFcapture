@@ -21,7 +21,6 @@
 #include "files_app.h"
 #include "drum_app.h"
 #include "harness_app.h"
-#include "ota_service.h"
 #include "ir_config.h"
 #if ENABLE_IR_TOOLS
 #include "ir_app.h"
@@ -99,11 +98,6 @@ void setup()
     digitalWrite(3, HIGH);
 
     const launcher::App app = launcher::currentApp();
-
-    // Remote OTA is always available outside the Settings app.  Settings owns
-    // its own OTA page and calls ArduinoOTA.end() on exit, so starting the
-    // global service there would create a second lifecycle.
-    if (app != launcher::kAppSettings) otaservice::begin();
 
     switch (app) {
         case launcher::kAppRf:
@@ -205,8 +199,6 @@ void setup()
 
 void loop()
 {
-    if (g_running != Running::kSettings) otaservice::tick();
-
     switch (g_running) {
         case Running::kRf:
             if (g_rf) g_rf->update();
