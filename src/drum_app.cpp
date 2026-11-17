@@ -50,8 +50,12 @@ bool playing = false;
 bool dirty = true;
 uint32_t nextStepMs = 0;
 uint32_t rng = 0x12345678;
-int16_t stepBuf[kMaxSamples];
-float mixBuf[kMaxSamples];
+// Allocated in setup(), not static BSS: 48 KiB of static buffers here pushed
+// the whole firmware's free heap below the point where lwIP could build TCP
+// segments — the HARNESS voice upload died with EAGAIN ("write payload").
+// App switching reboots the device, so there is nothing to free.
+int16_t* stepBuf = nullptr;
+float* mixBuf = nullptr;
 size_t stepSamples = 0;
 size_t stepOffset = 0;
 
@@ -319,6 +323,13 @@ void setup()
     lcd.setTextFont(1);
     lcd.setTextSize(1);
     lcd.setTextWrap(false);
+    if (stepBuf == nullptr) stepBuf = static_cast<int16_t*>(malloc(kMaxSamples * sizeof(int16_t)));
+    if (mixBuf == nullptr) mixBuf = static_cast<float*>(malloc(kMaxSamples * sizeof(float)));
+    if (stepBuf == nullptr || mixBuf == nullptr) {
+        lcd.setTextColor(TFT_RED, TFT_BLACK);
+        lcd.drawString("drum: no mem", 4, 40);
+        return;
+    }
     load();
     dirty = true;
     draw();
@@ -326,6 +337,12 @@ void setup()
 
 void loop()
 {
+    if (stepBuf == nullptr || mixBuf == nullptr) {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isPressed()) launcher::rebootInto(launcher::kAppMenu);
+        delay(20);
+        return;
+    }
     M5Cardputer.update();
     handle();
     tickAudio();
