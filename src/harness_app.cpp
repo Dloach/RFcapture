@@ -408,9 +408,14 @@ void applySnapshot(JsonArray messages)
 void handleMessage(const char* json, size_t length)
 {
     // Parsing a frame with almost no heap left is how loading a session turned
-    // into a panic (reset=4).  Refuse it and say so instead of dying.
-    if (ESP.getFreeHeap() < 18000) {
-        usbLogf("[rx] skip len=%u low heap=%u", static_cast<unsigned>(length), ESP.getFreeHeap());
+    // into a panic (reset=4).  Refuse it and say so instead of dying.  The floor
+    // scales with the frame: a 55-byte hello or a 2 KiB session list needs only a
+    // few KiB, and blocking those at a flat 18 KiB floor meant the deck never
+    // populated even though the link was up.  Bulk snapshots still need headroom.
+    const uint32_t need = static_cast<uint32_t>(length) * 2 + 3000;
+    if (ESP.getFreeHeap() < need) {
+        usbLogf("[rx] skip len=%u need=%u heap=%u", static_cast<unsigned>(length),
+                static_cast<unsigned>(need), ESP.getFreeHeap());
         return;
     }
     JsonDocument doc;
@@ -527,8 +532,12 @@ constexpr size_t   kVoiceSamples = 3840;   // 240 ms at 16 kHz per read/send
 constexpr uint32_t kVoiceRate    = 16000;
 constexpr uint32_t kVoiceMaxMs   = 20000;  // hard cap; ENT/Fn+V stops earlier
 
-int16_t voiceReadBuf[kVoiceSamples];
-uint8_t voiceB64[10800];
+// Allocated only while dictating (voiceStart) and freed afterwards: keeping these
+// two as static BSS held ~18 KiB even at idle, which starved lwIP below the point
+// where it could open a socket or send a frame ("no session").
+constexpr size_t kVoiceB64Size = 10800;
+int16_t* voiceReadBuf = nullptr;
+uint8_t* voiceB64     = nullptr;
 uint8_t  voiceLevel  = 0;  // 0..100 for the on-screen meter
 uint32_t voiceMeasuredHz = 0;
 uint32_t voiceHwHz = 0;    // true hardware I2S rate from a pure-read self-test
@@ -536,8 +545,9 @@ bool     g_micUp = false;  // mic/codec brought up once, shared by self-test + c
 
 size_t voiceSendPcm(const int16_t* pcm, size_t samples)
 {
+    if (voiceB64 == nullptr) return 0;
     size_t encodedLen = 0;
-    if (mbedtls_base64_encode(voiceB64, sizeof(voiceB64), &encodedLen,
+    if (mbedtls_base64_encode(voiceB64, kVoiceB64Size, &encodedLen,
                               reinterpret_cast<const unsigned char*>(pcm),
                               samples * sizeof(int16_t)) != 0) {
         return 0;
@@ -803,7 +813,23 @@ void voiceStart()
     markDirty();
     render();  // show LISTENING before the blocking capture
 
+    if (voiceReadBuf == nullptr)
+        voiceReadBuf = static_cast<int16_t*>(malloc(kVoiceSamples * sizeof(int16_t)));
+    if (voiceB64 == nullptr)
+        voiceB64 = static_cast<uint8_t*>(malloc(kVoiceB64Size));
+    if (voiceReadBuf == nullptr || voiceB64 == nullptr) {
+        free(voiceReadBuf); voiceReadBuf = nullptr;
+        free(voiceB64);     voiceB64     = nullptr;
+        voice      = Voice::kIdle;
+        statusText = "VOICE FAILED";
+        lastError  = "no mem";
+        markDirty();
+        return;
+    }
+
     const bool ok = voiceCapture(kVoiceMaxMs, true);
+    free(voiceReadBuf); voiceReadBuf = nullptr;
+    free(voiceB64);     voiceB64     = nullptr;
     if (!ok) {
         voice      = Voice::kIdle;
         statusText = "VOICE FAILED";
