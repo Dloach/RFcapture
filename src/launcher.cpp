@@ -314,6 +314,11 @@ void drawBootProgress(int percent)
 
 App currentApp()
 {
+#if HARNESS_BOOT_SELFTEST
+    // Bring-up build only (env:harness-selftest): cold boot lands in the WS
+    // HARNESS app so the host plugin can be verified without key presses.
+    return kAppHarness;
+#endif
 #if IR_BOOT_SELFTEST
     // Bring-up build only (env:ir-selftest): every software reset lands in IR
     // TOOLS so the feature can be exercised from a plain serial log, with no
