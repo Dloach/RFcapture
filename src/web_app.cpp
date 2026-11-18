@@ -41,6 +41,18 @@ String uploadPath = "/";
 String browsePath = "/";
 File uploadFile;
 size_t uploadBytes = 0;
+// Per-upload state.  The upload callback fires while the request body is
+// still being parsed -- long before uploadDone()'s auth() runs -- so an
+// unauthenticated POST /upload would otherwise land a file on the card and
+// only then receive its 401.  uploadAuthorized is checked on every chunk.
+bool uploadAuthorized = false;
+bool uploadTooBig     = false;
+String uploadFilePath;
+// Hard cap per uploaded file, and the free space that must remain before an
+// upload may start.  These bound a hostile or runaway POST even though the
+// body itself is consumed by the parser regardless.
+constexpr size_t kUploadMaxBytes = 256u * 1024u * 1024u;
+constexpr uint64_t kUploadMinFreeBytes = 8u * 1024u * 1024u;
 
 struct Hint {
     const char* key;
@@ -269,23 +281,66 @@ void handleUploadChunk()
 {
     HTTPUpload& up = server.upload();
     if (up.status == UPLOAD_FILE_START) {
+        // The request headers are fully parsed by now, so the credentials (if
+        // any) can be checked here, on the first chunk, instead of waiting for
+        // uploadDone() -- which only runs after the whole body has been
+        // consumed and the file is already on the card.
+        uploadAuthorized = server.authenticate(kUser, kPass);
+        uploadTooBig     = false;
+        uploadFilePath   = "";
+        if (!uploadAuthorized) {
+            snprintf(status, sizeof(status), "UPLOAD DENIED");
+            dirty = true;
+            return;
+        }
         String name = baseName(up.filename);
         if (name.length() == 0 || name.indexOf("..") >= 0) name = "upload.bin";
         String path = uploadPath == "/" ? "/" + name : uploadPath + "/" + name;
+        const uint64_t total = SD.totalBytes();
+        const uint64_t used  = SD.usedBytes();
+        if (total > used && total - used < kUploadMinFreeBytes) {
+            snprintf(status, sizeof(status), "TF NEARLY FULL");
+            dirty = true;
+            return;
+        }
         uploadFile = SD.open(path, FILE_WRITE);
         uploadBytes = 0;
         if (uploadFile) {
+            uploadFilePath = path;
             snprintf(status, sizeof(status), "UPLOAD %s", name.c_str());
             dirty = true;
         }
     } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (!uploadAuthorized) return;
         if (uploadFile) {
+            if (uploadBytes + up.currentSize > kUploadMaxBytes) {
+                // Over the cap: stop accepting, drop what was written so far.
+                uploadTooBig = true;
+                uploadFile.close();
+                SD.remove(uploadFilePath);
+                uploadFilePath = "";
+                snprintf(status, sizeof(status), "UPLOAD TOO BIG");
+                dirty = true;
+                return;
+            }
             const size_t w = uploadFile.write(up.buf, up.currentSize);
             uploadBytes += w;
         }
     } else if (up.status == UPLOAD_FILE_END || up.status == UPLOAD_FILE_ABORTED) {
         if (uploadFile) uploadFile.close();
-        snprintf(status, sizeof(status), "UPLOAD %u B", static_cast<unsigned>(uploadBytes));
+        if (!uploadAuthorized || uploadTooBig || up.status == UPLOAD_FILE_ABORTED) {
+            // Never leave half a file behind: an aborted, oversized or
+            // unauthorized upload is removed rather than kept.
+            if (uploadFilePath.length() > 0) SD.remove(uploadFilePath);
+            uploadFilePath = "";
+            uploadBytes = 0;
+            snprintf(status, sizeof(status),
+                     up.status == UPLOAD_FILE_ABORTED ? "UPLOAD ABORTED"
+                                                      : (uploadTooBig ? "UPLOAD TOO BIG"
+                                                                      : "UPLOAD DENIED"));
+        } else {
+            snprintf(status, sizeof(status), "UPLOAD %u B", static_cast<unsigned>(uploadBytes));
+        }
         dirty = true;
     }
 }
@@ -293,6 +348,10 @@ void handleUploadChunk()
 void uploadDone()
 {
     if (!auth()) return;
+    if (uploadTooBig) {
+        server.send(413, "text/plain", "upload too large");
+        return;
+    }
     server.sendHeader("Location", "/?path=" + urlEncode(uploadPath));
     server.send(303, "text/plain", "uploaded");
 }
