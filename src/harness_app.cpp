@@ -297,22 +297,23 @@ void chatAddMessage(const String& role, const String& text)
     markDirty();
 }
 
+void audioTone(float hz, uint32_t ms);
+void audioSilence(uint32_t ms);
+
 /// Short descending two-note cue when the assistant commits a reply.  Kept
-/// deliberately unlike the rising OTA chime.  Silent once the microphone has
-/// taken the shared codec: touching the speaker then is at best inaudible and
-/// at worst disturbs the capture path.
-extern bool g_micUp;
+/// deliberately unlike the rising OTA chime.  The I2S path is full-duplex, so
+/// this can play while the microphone stays initialized.
 void assistantChime()
 {
-    if (voice != Voice::kIdle || g_micUp) return;
+    if (voice != Voice::kIdle) return;
     static uint32_t lastAt = 0;
     const uint32_t now = millis();
     if (lastAt != 0 && now - lastAt < 1200) return;
     lastAt = now;
-    M5.Speaker.setVolume(180);
-    M5.Speaker.tone(1568, 80);   // G6
-    delay(100);
-    M5.Speaker.tone(1047, 160);  // C6
+    audioTone(1568, 80);   // G6
+    audioSilence(20);
+    audioTone(1047, 160);  // C6
+    audioSilence(30);
 }
 
 void chatClear()
@@ -658,9 +659,8 @@ void render();  // defined in the rendering section below
 
 void voiceAbort(const char* why)
 {
-    // Do NOT M5.Mic.end() here: tearing the shared I2S/codec down is what
-    // crashed the app on the old timeout path.  Leaving the capture channel up
-    // is safe; the next Fn+V reads it again.
+    // The full-duplex driver is never torn down; a failed capture only resets
+    // state, so the next Fn+V can read the same live channel again.
     if (voice != Voice::kIdle) ws.sendText("{\"type\":\"stt.abort\"}");
     voice      = Voice::kIdle;
     statusText = "VOICE FAILED";
@@ -669,26 +669,140 @@ void voiceAbort(const char* why)
     markDirty();
 }
 
-// --- capture: direct I2S read -----------------------------------------------
-// M5.Mic.begin() initialises the ES8311 (I2C registers) and installs the I2S
-// driver for the microphone (port 0, BCLK 41, WS 43, DIN 46 on Cardputer ADV).
-// Its record()/isRecording() request machinery delivers a buffer only every
-// ~3 s here, so the audio is pulled straight off the installed driver with
-// i2s_read() instead: one blocking read per 240 ms block, continuously.
+// --- capture: full-duplex I2S read ------------------------------------------
+// audioInit() owns the ES8311 codec and I2S0 in full duplex (BCLK 41, WS 43,
+// DOUT 42, DIN 46).  A capture only reads interleaved stereo frames from the
+// already-running driver and keeps the left (microphone) slot.
 constexpr size_t   kVoiceSamples = 1920;   // 120 ms at 16 kHz per read/send
 constexpr uint32_t kVoiceRate    = 16000;
 constexpr uint32_t kVoiceMaxMs   = 20000;  // hard cap; ENT/Fn+V stops earlier
 
-// Allocated only while dictating (voiceStart) and freed afterwards: keeping these
-// two as static BSS held ~18 KiB even at idle, which starved lwIP below the point
-// where it could open a socket or send a frame ("no session").
-constexpr size_t kVoiceB64Size = 10800;
+// Allocated only while dictating (voiceStart) and freed afterwards: keeping
+// them as static BSS held ~18 KiB even at idle, which starved lwIP below the
+// point where it could open a socket or send a frame ("no session").
+constexpr size_t kVoiceB64Size = 6000;
 int16_t* voiceReadBuf = nullptr;
+int16_t* voiceStereoBuf = nullptr;  // interleaved L/R scratch for the RX read
 uint8_t* voiceB64     = nullptr;
 uint8_t  voiceLevel  = 0;  // 0..100 for the on-screen meter
 uint32_t voiceMeasuredHz = 0;
-uint32_t voiceHwHz = 0;    // true hardware I2S rate from a pure-read self-test
-bool     g_micUp = false;  // mic/codec brought up once, shared by self-test + capture
+uint32_t voiceHwHz = 0;    // declared rate; audioInit() sets it to kVoiceRate
+bool     g_micUp = false;  // full-duplex audio brought up
+bool     g_audioReady = false;
+i2s_port_t g_voicePort = I2S_NUM_0;
+
+// --- full-duplex ES8311 + I2S ----------------------------------------------
+// The speaker and microphone share one ES8311 codec and one I2S clock.  The
+// M5Unified Speaker/Mic helpers each install a single-direction driver and
+// uninstall the other, so this path drives the codec and a full-duplex I2S0
+// directly: both directions stay live, and a prompt tone no longer costs the
+// microphone.  Pinout and the REG01=0xBF clock union follow the proven
+// Cardputer ADV implementation.
+constexpr uint8_t kCodecAddr = 0x18;
+constexpr int     kAudioBclk = 41;
+constexpr int     kAudioWs   = 43;
+constexpr int     kAudioDout = 42;  // speaker data
+constexpr int     kAudioDin  = 46;  // microphone data
+
+bool audioWriteReg(uint8_t reg, uint8_t value)
+{
+    return M5.In_I2C.writeRegister8(kCodecAddr, reg, value, 100000);
+}
+
+bool audioInit()
+{
+    if (g_audioReady) return true;
+
+    // M5Unified's mic value (0xBA) and speaker value (0xB5) differ only in the
+    // independent ADC/DAC clock gates; 0xBF keeps both chains clocked.
+    bool ok = true;
+    ok &= audioWriteReg(0x00, 0x80);  // reset / power on
+    ok &= audioWriteReg(0x01, 0xBF);  // MCLK=BCLK, ADC+DAC clocks
+    ok &= audioWriteReg(0x02, 0x18);
+    ok &= audioWriteReg(0x0D, 0x01);
+    ok &= audioWriteReg(0x0E, 0x02);  // PGA + ADC modulator
+    ok &= audioWriteReg(0x14, 0x16);  // mic PGA ~ +18 dB
+    ok &= audioWriteReg(0x16, 0x02);  // ADC scale +12 dB
+    ok &= audioWriteReg(0x17, 0xBF);  // ADC digital 0 dB
+    ok &= audioWriteReg(0x1C, 0x6A);  // HPF
+    ok &= audioWriteReg(0x12, 0x00);  // DAC power up
+    ok &= audioWriteReg(0x13, 0x10);  // HP drive
+    ok &= audioWriteReg(0x32, 0xB8);  // DAC volume
+    ok &= audioWriteReg(0x37, 0x08);  // DAC EQ bypass
+    delay(20);
+    if (!ok) usbLogf("[audio] codec write failed");
+
+    i2s_config_t cfg = {};
+    cfg.mode                 = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
+    cfg.sample_rate          = kVoiceRate;
+    cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT;
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    cfg.intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count        = 8;
+    cfg.dma_buf_len          = 256;
+    cfg.use_apll             = false;
+    cfg.tx_desc_auto_clear   = true;
+    cfg.fixed_mclk           = 0;
+
+    if (i2s_driver_install(g_voicePort, &cfg, 0, nullptr) != ESP_OK) {
+        usbLogf("[audio] i2s install failed");
+        return false;
+    }
+    i2s_pin_config_t pins = {};
+    pins.bck_io_num   = kAudioBclk;
+    pins.ws_io_num    = kAudioWs;
+    pins.data_out_num = kAudioDout;
+    pins.data_in_num  = kAudioDin;
+    if (i2s_set_pin(g_voicePort, &pins) != ESP_OK) {
+        usbLogf("[audio] i2s pin failed");
+        return false;
+    }
+    i2s_zero_dma_buffer(g_voicePort);
+    i2s_start(g_voicePort);
+    g_audioReady = true;
+    voiceHwHz    = kVoiceRate;
+    usbLogf("[audio] full duplex ready");
+    return true;
+}
+
+/// One square-wave note on the speaker, written straight into the shared I2S
+/// TX stream.  Paces itself on the DMA so the caller needs no delay.
+void audioTone(float hz, uint32_t ms)
+{
+    if (!audioInit()) return;
+    static int16_t frames[320 * 2];
+    const uint32_t step  = static_cast<uint32_t>(hz * 65536.0f / kVoiceRate);
+    uint32_t       total = kVoiceRate * ms / 1000;
+    uint32_t       phase = 0;
+    while (total > 0) {
+        const size_t n = total < 320 ? total : 320;
+        for (size_t i = 0; i < n; ++i) {
+            phase += step;
+            const int16_t v = (phase & 0x8000) ? 7000 : -7000;
+            frames[i * 2]     = v;
+            frames[i * 2 + 1] = v;
+        }
+        size_t written = 0;
+        i2s_write(g_voicePort, frames, n * 2 * sizeof(int16_t), &written,
+                  100 / portTICK_PERIOD_MS);
+        total -= n;
+    }
+}
+
+void audioSilence(uint32_t ms)
+{
+    if (!audioInit()) return;
+    static int16_t frames[320 * 2] = {0};
+    uint32_t total = kVoiceRate * ms / 1000;
+    while (total > 0) {
+        const size_t n = total < 320 ? total : 320;
+        size_t written = 0;
+        i2s_write(g_voicePort, frames, n * 2 * sizeof(int16_t), &written,
+                  100 / portTICK_PERIOD_MS);
+        total -= n;
+    }
+}
 
 size_t voiceSendPcm(const int16_t* pcm, size_t samples)
 {
@@ -707,132 +821,24 @@ size_t voiceSendPcm(const int16_t* pcm, size_t samples)
     return ws.sendText(frame) ? encodedLen : 0;
 }
 
-/// Dump the ES8311 register file after M5Unified configured it: that dump is
-/// the exact codec state a self-contained I2S bring-up has to reproduce.
-void voiceDumpCodec()
-{
-    for (int base = 0; base < 0x20; base += 8) {
-        char line[96];
-        int  n = snprintf(line, sizeof(line), "[voice] reg%02X:", base);
-        for (int r = base; r < base + 8 && n < static_cast<int>(sizeof(line)) - 4; ++r) {
-            uint8_t v = 0;
-            if (!M5.In_I2C.readRegister(0x18, static_cast<uint8_t>(r), &v, 1, 100000)) v = 0xEE;
-            n += snprintf(line + n, sizeof(line) - n, " %02X", static_cast<unsigned>(v));
-        }
-        usbLogf("%s", line);
-    }
-}
-
-/// I2S port in use for capture; M5Unified installs the mic on port 0.
-i2s_port_t g_voicePort = I2S_NUM_0;
-
-// Diagnostic: measure the TRUE hardware I2S rate with pure blocking reads — no
-// render, no WS send, no keyboard scan — so the capture loop cannot starve it.
-// This separates "bit clock wrong" (hw rate low here too) from "loop drops
-// samples" (hw rate fine here, low only in the capture loop). Runs once, no
-// speech needed. The steady-state rate is ~16 kHz, matching the rate:16000 the
-// device reports to the Host (the capture loop reads 3840 samples in ~237 ms).
-void voiceSelfTest()
-{
-    uint8_t r01 = 0xEE, r02 = 0xEE;
-    M5.In_I2C.readRegister(0x18, 0x01, &r01, 1, 100000);
-    M5.In_I2C.readRegister(0x18, 0x02, &r02, 1, 100000);
-
-    int16_t  buf[256];
-    // Drain the RX backlog first. After begin() + the settle delays the DMA
-    // holds samples captured before this test started; counting them inflates
-    // the rate (an un-drained 600 ms window read ~17.5 kHz instead of ~16 kHz).
-    const uint32_t drainStart = millis();
-    while (millis() - drainStart < 250) {
-        size_t got = 0;
-        i2s_read(g_voicePort, buf, sizeof(buf), &got, 100 / portTICK_PERIOD_MS);
-    }
-
-    uint32_t totalBytes = 0;
-    const uint32_t start = millis();
-    while (millis() - start < 600) {
-        size_t got = 0;
-        if (i2s_read(g_voicePort, buf, sizeof(buf), &got, 100 / portTICK_PERIOD_MS) == ESP_OK) {
-            totalBytes += got;
-        }
-    }
-    const uint32_t elapsed = millis() - start;
-    voiceHwHz = elapsed ? (totalBytes / 2) * 1000u / elapsed : 0;
-    usbLogf("[voice] SELFTEST hw=%uHz bytes=%u/%ums ES8311 01=%02X 02=%02X",
-            static_cast<unsigned>(voiceHwHz), static_cast<unsigned>(totalBytes),
-            static_cast<unsigned>(elapsed), static_cast<unsigned>(r01), static_cast<unsigned>(r02));
-    // Persist so the result survives reboot and can be read back at any time
-    // (the periodic [mem] line carries it), not just in the live USB window.
-    Preferences p;
-    if (p.begin("harness", false)) { p.putUInt("hwHz", voiceHwHz); p.end(); }
-}
-
 bool voiceI2sBegin()
 {
-    usbLogf("[voice] begin");
-
-    // Let M5Unified bring the ES8311 up exactly as it does for its own capture
-    // (its register file is the only one that produced real audio here).
-    M5.Speaker.setVolume(0);
-    const bool powered = M5.Speaker.begin();
-    M5.Speaker.stop();
-    delay(30);
-
-    auto micCfg = M5.Mic.config();
-    micCfg.magnification      = 16;
-    micCfg.noise_filter_level = 0;
-    // Deepen the RX DMA (default 8x128 = 1024 samples) so the ~24 ms WS send per
-    // block does not overflow the FIFO during a long dictation: 12x256 = 3072
-    // samples gives ~192 ms of slack instead of ~64 ms. Kept below 16x256 so the
-    // boot low-watermark stays clear of the ~19 KiB session-load panic floor.
-    micCfg.dma_buf_len        = 256;
-    micCfg.dma_buf_count      = 12;
-    M5.Mic.config(micCfg);
-    if (!M5.Mic.begin()) {
-        usbLogf("[voice] mic begin failed");
-        return false;
-    }
-    delay(200);
-
-    // M5Unified's Cardputer ADV mic callback leaves the ES8311 front-end at
-    // minimum analog gain (0x14=0x10 PGA 0 dB, 0x17=0xBF ADC 0 dB). A baseline
-    // capture measured peak 3.4 % FS / RMS -58 dBFS — far too quiet for ASR.
-    // Raise the analog PGA to +21 dB and ADC to +6 dB (the front-end M5 uses on
-    // its Stopwatch board) so the signal is amplified BEFORE the ADC, which is
-    // what improves SNR; software gain after the ADC only amplifies noise too.
-    // 0x1C=0x64 enables the dynamic HPF to cut sub-200 Hz rumble.
-    M5.In_I2C.writeRegister8(0x18, 0x14, 0x17, 100000);
-    M5.In_I2C.writeRegister8(0x18, 0x17, 0xCB, 100000);
-    M5.In_I2C.writeRegister8(0x18, 0x1C, 0x64, 100000);
-    uint8_t g14 = 0xEE, g17 = 0xEE, g1c = 0xEE;
-    M5.In_I2C.readRegister(0x18, 0x14, &g14, 1, 100000);
-    M5.In_I2C.readRegister(0x18, 0x17, &g17, 1, 100000);
-    M5.In_I2C.readRegister(0x18, 0x1C, &g1c, 1, 100000);
-    usbLogf("[voice] gain set PGA=0x%02X ADC=0x%02X HPF=0x%02X",
-            static_cast<unsigned>(g14), static_cast<unsigned>(g17), static_cast<unsigned>(g1c));
-
-    usbLogf("[voice] speaker=%d codec ready", powered ? 1 : 0);
-    voiceDumpCodec();
-
-    // Keep M5Unified's I2S channel and read it directly. The ES8311 is an I2S
-    // slave (reg 0x01=0xBA: MCLK=BCLK), clocked by the S3's I2S peripheral. Its
-    // record()/isRecording() request machinery only hands back a buffer every
-    // few seconds here, so i2s_read() pulls samples straight off the driver.
-    g_voicePort = I2S_NUM_0;
-    usbLogf("[voice] reading M5Unified's channel on port 0");
-    delay(30);
-    usbLogf("[voice] ready (borrowed)");
-    voiceSelfTest();
-    return true;
+    const bool ok = audioInit();
+    if (ok) g_micUp = true;
+    return ok;
 }
 
 size_t voiceRead(int16_t* buffer, size_t samples, uint32_t timeoutMs)
 {
+    if (voiceStereoBuf == nullptr || samples > kVoiceSamples) return 0;
     size_t bytesRead = 0;
-    const esp_err_t err = i2s_read(g_voicePort, buffer, samples * sizeof(int16_t), &bytesRead,
+    const esp_err_t err = i2s_read(g_voicePort, voiceStereoBuf,
+                                   samples * 2 * sizeof(int16_t), &bytesRead,
                                    timeoutMs / portTICK_PERIOD_MS);
     if (err != ESP_OK) return 0;
-    return bytesRead / sizeof(int16_t);
+    const size_t frames = bytesRead / (2 * sizeof(int16_t));
+    for (size_t i = 0; i < frames; ++i) buffer[i] = voiceStereoBuf[i * 2];
+    return frames;
 }
 
 /// Unity software gain + soft-limit, tracking the peak for the log. The analog
@@ -862,10 +868,9 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
         g_micUp = true;
     }
 
-    // Re-enable the shared RX channel at capture time.  M5Unified's capture
-    // task leaves it stopped between captures; starting it here is what made
-    // repeated captures work without tearing the codec down.
-    i2s_start(g_voicePort);
+    // The full-duplex driver stays installed and started; a capture only reads
+    // from it, so there is no per-capture begin/end cycle to destabilize.
+    // M5Unified's capture task is not used at all here.
 
     // Declare the rate the hardware actually produces, not the nominal 16000:
     // the capture loop measures ~14.8 kHz, and telling Vosk 16 kHz makes speech
@@ -998,11 +1003,14 @@ void voiceStart()
 
     if (voiceReadBuf == nullptr)
         voiceReadBuf = static_cast<int16_t*>(malloc(kVoiceSamples * sizeof(int16_t)));
+    if (voiceStereoBuf == nullptr)
+        voiceStereoBuf = static_cast<int16_t*>(malloc(kVoiceSamples * 2 * sizeof(int16_t)));
     if (voiceB64 == nullptr)
         voiceB64 = static_cast<uint8_t*>(malloc(kVoiceB64Size));
-    if (voiceReadBuf == nullptr || voiceB64 == nullptr) {
-        free(voiceReadBuf); voiceReadBuf = nullptr;
-        free(voiceB64);     voiceB64     = nullptr;
+    if (voiceReadBuf == nullptr || voiceStereoBuf == nullptr || voiceB64 == nullptr) {
+        free(voiceReadBuf);   voiceReadBuf   = nullptr;
+        free(voiceStereoBuf); voiceStereoBuf = nullptr;
+        free(voiceB64);       voiceB64       = nullptr;
         voice      = Voice::kIdle;
         statusText = "VOICE FAILED";
         lastError  = "no mem";
@@ -1011,8 +1019,9 @@ void voiceStart()
     }
 
     const bool ok = voiceCapture(kVoiceMaxMs, true);
-    free(voiceReadBuf); voiceReadBuf = nullptr;
-    free(voiceB64);     voiceB64     = nullptr;
+    free(voiceReadBuf);   voiceReadBuf   = nullptr;
+    free(voiceStereoBuf); voiceStereoBuf = nullptr;
+    free(voiceB64);       voiceB64       = nullptr;
     if (!ok) {
         voice      = Voice::kIdle;
         statusText = "VOICE FAILED";
@@ -1849,16 +1858,12 @@ void startOta()
         otaUploading = false;
         otaPercent   = 100;
         snprintf(otaStatus, sizeof(otaStatus), "DONE - REBOOTING");
-        // Same rising cue as the SETTINGS OTA page.  Best-effort: after a
-        // dictation the microphone owns the shared I2S and the cue is silent;
-        // before it, the speaker is free and it plays.
-        if (!g_micUp) {
-            M5.Speaker.setVolume(160);
-            M5.Speaker.tone(1047, 90);  delay(110);
-            M5.Speaker.tone(1319, 90);  delay(110);
-            M5.Speaker.tone(1568, 90);  delay(110);
-            M5.Speaker.tone(2093, 240); delay(260);
-        }
+        // Same rising cue as the SETTINGS OTA page; the full-duplex path keeps
+        // the speaker live regardless of microphone state.
+        audioTone(1047, 90); audioSilence(20);
+        audioTone(1319, 90); audioSilence(20);
+        audioTone(1568, 90); audioSilence(20);
+        audioTone(2093, 240); audioSilence(30);
         markDirty();
     });
     ArduinoOTA.onError([](ota_error_t error) {
@@ -1967,6 +1972,10 @@ void linkService()
 void setup()
 {
     auto cfg = M5.config();
+    // HARNESS owns the ES8311 and I2S0; stop M5Unified from installing its
+    // single-direction audio drivers before the full-duplex one is created.
+    cfg.internal_spk = false;
+    cfg.internal_mic = false;
     M5Cardputer.begin(cfg, true);
     Serial.begin(115200);
     detachInterrupt(digitalPinToInterrupt(RF_KBD_INT));
@@ -1993,11 +2002,11 @@ void setup()
     canvas.setTextSize(1);
 
     loadPrefs();
-    {
-        Preferences p;
-        if (p.begin("harness", true)) { voiceHwHz = p.getUInt("hwHz", 0); p.end(); }
-    }
     ws.setMessageHandler(handleWsMessage, nullptr);
+
+    // Bring the full-duplex audio up before the first reply/chime, so the
+    // microphone and speaker are both available from the start.
+    g_micUp = voiceI2sBegin();
 
     screen     = Screen::kDeck;
     statusText = "STARTING";
