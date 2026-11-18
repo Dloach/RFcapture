@@ -204,6 +204,12 @@ const int ch = 9;
 // One grid cell.  During playback only the two changed columns are repainted
 // through this — a full fillScreen every step (twice a second at 120 BPM)
 // made the whole screen flicker.
+//
+// The cursor is deliberately not painted here.  Its frame lives in the 1 px
+// gutter the neighbouring cells share and paint with the background, so the
+// cell to the right and the row below used to erase its right and bottom
+// edges — the cursor showed as only the top-left half of a box.  drawCursor()
+// paints the whole frame over the finished grid instead.
 void drawCell(int t, int s)
 {
     const int x = gx + s * cw;
@@ -212,9 +218,19 @@ void drawCell(int t, int s)
     const bool playingHere = playing && s == playStep;
     uint16_t fill = on ? (playingHere ? kOk : kAccent) : (playingHere ? kBar : 0x0841);
     lcd.fillRect(x, y, cw - 1, ch - 1, fill);
-    // Cursor ring sits in the 1 px gutter around the cell; repaint it either
-    // with the cursor colour or with the background to erase a stale ring.
-    lcd.drawRect(x - 1, y - 1, cw + 1, ch + 1, (t == track && s == step) ? kRed : kBg);
+    // Clear the gutter around the cell so a frame left behind by an earlier
+    // cursor position cannot survive a partial repaint.
+    lcd.drawRect(x - 1, y - 1, cw + 1, ch + 1, kBg);
+}
+
+// The selection box: a complete, four-sided 1 px frame in the gutter around
+// the cell.  Must be drawn after every cell it overlaps, otherwise a cell
+// repaint wipes an edge.
+void drawCursor()
+{
+    const int x = gx + step * cw;
+    const int y = gy + track * ch;
+    lcd.drawRect(x - 1, y - 1, cw + 1, ch + 1, kRed);
 }
 
 void draw()
@@ -228,6 +244,7 @@ void draw()
         lcd.drawString(kNames[t], 2, y);
         for (int s = 0; s < kSteps; ++s) drawCell(t, s);
     }
+    drawCursor();  // last, so no neighbouring cell can clip its frame
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("step ", 2, 108);
     char pos[32];
@@ -284,6 +301,7 @@ void tickAudio()
         drawCell(t, prev);
         drawCell(t, playStep);
     }
+    drawCursor();  // those repaints may have cleared an edge of the frame
 }
 
 void handle()

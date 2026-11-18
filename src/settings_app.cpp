@@ -10,6 +10,7 @@
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
+#include "flash_ui.h"
 #include "ui_hint.h"
 #include "ui_prefs.h"
 #include "wifi_store.h"
@@ -62,6 +63,7 @@ constexpr char kOtaPassword[] = "cardputer-ota";
 bool otaStarted  = false;
 volatile bool otaUploading = false;
 volatile int otaPercent    = 0;
+bool otaFailed   = false;
 char otaStatus[40] = "IDLE";
 
 enum : uint32_t {
@@ -385,6 +387,22 @@ void drawSaved()
     hints(h, 3);
 }
 
+// Audible confirmation for a completed OTA upload.  `onEnd` runs just before
+// ArduinoOTA restarts the board, so the notes have to be played and waited for
+// here — there is no later moment on this boot, and the next boot cannot know
+// an update just happened.  C6-E6-G6-C7: short, rising, hard to miss.
+void otaSuccessChime()
+{
+    static const uint16_t notes[]   = {1047, 1319, 1568, 2093};
+    static const uint16_t holdMs[]  = {85, 85, 85, 240};
+    M5.Speaker.setVolume(160);
+    for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); ++i) {
+        M5.Speaker.tone(notes[i], holdMs[i]);
+        delay(holdMs[i] + 25);
+    }
+    M5.Speaker.stop();
+}
+
 void startOta()
 {
     if (otaStarted || WiFi.status() != WL_CONNECTED) return;
@@ -393,6 +411,7 @@ void startOta()
     ArduinoOTA.setPort(3232);
     ArduinoOTA.onStart([]() {
         otaUploading = true;
+        otaFailed    = false;
         otaPercent   = 0;
         snprintf(otaStatus, sizeof(otaStatus), "UPLOADING");
         dirty = true;
@@ -406,9 +425,11 @@ void startOta()
         otaPercent   = 100;
         snprintf(otaStatus, sizeof(otaStatus), "DONE - REBOOTING");
         dirty = true;
+        otaSuccessChime();
     });
     ArduinoOTA.onError([](ota_error_t error) {
         otaUploading = false;
+        otaFailed    = true;
         snprintf(otaStatus, sizeof(otaStatus), "ERROR %d", static_cast<int>(error));
         dirty = true;
     });
@@ -422,6 +443,18 @@ void startOta()
 
 void drawOta()
 {
+    // While the image is being written there is exactly one screen: plain
+    // text and the whole-transfer progress bar.  The settings header, WiFi
+    // details and hints are not drawn at all.
+    if (otaUploading) {
+        flashui::draw(lcd, otaPercent, "DO NOT EXIT");
+        return;
+    }
+    if (otaFailed) {
+        flashui::drawError(lcd, otaStatus);
+        return;
+    }
+
     lcd.fillScreen(kBg);
     header("OTA UPDATE");
 
@@ -436,26 +469,22 @@ void drawOta()
         lcd.drawString(WiFi.SSID().c_str(), 6, 44);
     }
 
-    lcd.setTextColor(otaUploading ? kAccent : kText, kBg);
+    lcd.setTextColor(kText, kBg);
     lcd.drawString(otaStatus, 6, 60);
-    if (otaUploading || otaPercent > 0) {
-        lcd.drawRect(6, 72, 228, 10, kDim);
-        lcd.fillRect(7, 73, 226 * otaPercent / 100, 8, kOk);
-    }
 
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("HOST cardputer.local", 6, 84);
     lcd.drawString("PORT 3232   AUTH ON", 6, 94);
     lcd.drawString("Keep this page open while flashing.", 6, 104);
-
     static const Hint h[] = {{"esc", "back"}};
     hints(h, 1);
 }
 
 void enterOta()
 {
-    otaPercent = 0;
+    otaPercent   = 0;
     otaUploading = false;
+    otaFailed    = false;
     snprintf(otaStatus, sizeof(otaStatus), "WAITING FOR WIFI");
     scr   = Scr::kOta;
     dirty = true;
@@ -464,7 +493,12 @@ void enterOta()
 
 void handleOta(uint32_t pressed)
 {
-    if (pressed & kBack && !otaUploading) {
+    // While the image is being written, ignore every key.  The only safe action
+    // is to wait for the reboot; the red banner says so.  In particular this
+    // covers esc, which used to be the one key that could leave the page.
+    if (otaUploading) return;
+
+    if (pressed & kBack) {
         if (otaStarted) {
             ArduinoOTA.end();
             otaStarted = false;
@@ -1087,8 +1121,12 @@ bool loop()
 {
     M5Cardputer.update();
 
-    pollScan();
-    pollConnect();
+    // Nothing unrelated may touch the radio while an OTA image is being
+    // received; the dedicated flashing page is the only UI.
+    if (!otaUploading) {
+        pollScan();
+        pollConnect();
+    }
 
     if (scr == Scr::kOta) {
         if (WiFi.status() == WL_CONNECTED && !otaStarted) startOta();

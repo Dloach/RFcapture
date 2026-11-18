@@ -94,7 +94,6 @@ needed. The bundle row is `include:cardputer-ws`.
 | Chat | `Fn+S` | back to the deck |
 | Chat | `Fn+N` | new Session |
 | Chat | `Fn+X` | cancel the running turn |
-| Chat | `Fn+C` | link config |
 | Chat | `` ` `` | back to the deck |
 
 `Aa`/Shift is a modifier and never produces a character; `Backspace` deletes one

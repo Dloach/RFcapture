@@ -17,6 +17,7 @@
 #include "harness_app.h"
 
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <M5Cardputer.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -28,6 +29,7 @@
 #include <vector>
 
 #include "harness_ws.h"
+#include "flash_ui.h"
 #include "launcher.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
@@ -65,7 +67,7 @@ constexpr int      kMaxInput = 300;
 auto& lcd = M5Cardputer.Display;
 M5Canvas canvas;
 
-enum class Screen : uint8_t { kDeck, kChat, kPreview, kEdit, kConfig };
+enum class Screen : uint8_t { kDeck, kChat, kPreview, kEdit, kConfig, kApproval, kNew, kOta };
 Screen screen = Screen::kDeck;
 bool   dirty  = true;
 
@@ -91,6 +93,8 @@ int deckSel = 0;
 int deckTop = 0;
 
 String streamText;
+// Last few characters of the model's reasoning stream, shown next to RUN.
+String thinkingText;
 
 // Messages are kept as (role, text): the chat list shows one truncated line per
 // message and the full-screen view wraps on demand, so no wrapped copies are
@@ -109,6 +113,24 @@ bool     caretOn      = true;
 uint32_t caretAt      = 0;
 uint16_t parseFailures = 0;
 
+// One DSH tool-approval prompt.  The turn is blocked until it is answered, so
+// it takes over whatever screen is showing and returns there afterwards.
+// ENT must be held for a second: a plain tap is ignored so that typing a
+// prompt when the prompt appears cannot silently grant a tool.
+String   approvalId;
+String   approvalTool;
+String   approvalReason;
+Screen   approvalReturn = Screen::kChat;
+uint32_t approvalAt     = 0;   // millis() when the prompt arrived
+uint32_t approvalHoldAt = 0;   // 0 = ENT not held
+bool     approvalArmed  = false;  // ENT was released since the prompt appeared
+bool     approvalHoldFull = false;  // hold is Fn+ENT (full access), not plain ENT
+
+// New-session chooser: 0 = workspace-write (asks before wider steps),
+// 1 = full access (no further approval prompts for that Session).
+int    newControl = 0;
+Screen newReturn  = Screen::kDeck;
+
 bool   running = false;
 String input;
 String lastError;
@@ -119,6 +141,19 @@ bool wifiStarted = false;
 bool wsStarted   = false;
 bool wifiOk      = false;
 bool canvasReady = false;
+
+// OTA runs inside HARNESS (started once WiFi is up) so a flash does not need
+// leaving the app: the upload replaces the image and the reboot comes back to
+// HARNESS.  While otaUploading every key is ignored.
+bool          otaStarted  = false;
+volatile bool otaUploading = false;
+volatile bool otaFailed   = false;
+volatile int  otaPercent  = 0;
+char          otaStatus[32] = "";
+Screen        otaReturn   = Screen::kChat;
+
+bool     archiveArmed = false;
+uint32_t archiveAt    = 0;
 
 enum class Voice : uint8_t { kIdle, kWarmup, kRecording, kWaiting };
 Voice    voice      = Voice::kIdle;
@@ -163,6 +198,27 @@ String truncateUtf8(const String& text, int maxChars)
     }
     if (i >= len) return text;
     return text.substring(0, i) + "...";
+}
+
+/// Last `chars` UTF-8 characters, with control bytes folded to spaces so the
+/// one-line header cannot grow a newline.
+String tailUtf8(const String& text, int chars)
+{
+    int i = static_cast<int>(text.length());
+    while (i > 0 && chars > 0) {
+        int j = i - 1;
+        while (j > 0 && (static_cast<unsigned char>(text[j]) & 0xC0) == 0x80) --j;
+        i = j;
+        --chars;
+    }
+    String out = text.substring(i);
+    String clean;
+    clean.reserve(out.length());
+    for (size_t k = 0; k < out.length(); ++k) {
+        const char ch = out[k];
+        clean += (static_cast<unsigned char>(ch) < 0x20) ? ' ' : ch;
+    }
+    return clean;
 }
 
 String jsonEscape(const String& value)
@@ -239,6 +295,24 @@ void chatAddMessage(const String& role, const String& text)
     chatTrim();
     cursor = static_cast<int>(msgs.size());  // leave the cursor on the input row
     markDirty();
+}
+
+/// Short descending two-note cue when the assistant commits a reply.  Kept
+/// deliberately unlike the rising OTA chime.  Silent once the microphone has
+/// taken the shared codec: touching the speaker then is at best inaudible and
+/// at worst disturbs the capture path.
+extern bool g_micUp;
+void assistantChime()
+{
+    if (voice != Voice::kIdle || g_micUp) return;
+    static uint32_t lastAt = 0;
+    const uint32_t now = millis();
+    if (lastAt != 0 && now - lastAt < 1200) return;
+    lastAt = now;
+    M5.Speaker.setVolume(180);
+    M5.Speaker.tone(1568, 80);   // G6
+    delay(100);
+    M5.Speaker.tone(1047, 160);  // C6
 }
 
 void chatClear()
@@ -364,6 +438,26 @@ void sendCancel()
     markDirty();
 }
 
+/// Leave the approval overlay and tell the Host which way it went. `defer`
+/// hands the request back to the Desktop answerer.
+void answerApproval(const char* decision)
+{
+    if (screen != Screen::kApproval) return;
+    String frame = "{\"type\":\"approval.answer\",\"id\":\"";
+    frame += jsonEscape(approvalId);
+    frame += "\",\"decision\":\"";
+    frame += decision;
+    frame += "\"}";
+    ws.sendText(frame);
+    usbLogf("[approval] %s id=%s", decision, approvalId.c_str());
+    screen         = approvalReturn;
+    approvalId     = "";
+    approvalHoldAt = 0;
+    approvalArmed  = false;
+    approvalHoldFull = false;
+    markDirty();
+}
+
 void applySessions(JsonArray items)
 {
     sessions.clear();
@@ -465,16 +559,43 @@ void handleMessage(const char* json, size_t length)
             const bool assistant = strcmp(role, "assistant") == 0;
             if (assistant) streamText = "";
             chatAddMessage(assistant ? "assistant" : "user", String(text));
+            if (assistant) assistantChime();
         }
     } else if (strcmp(type, "status") == 0) {
         running = doc["running"] | false;
+        if (!running) thinkingText = "";
         markDirty();
+    } else if (strcmp(type, "thinking") == 0) {
+        const char* text = doc["text"] | "";
+        if (text[0] != '\0') {
+            thinkingText += text;
+            const int cap = 64;
+            if (thinkingText.length() > cap) {
+                thinkingText.remove(0, thinkingText.length() - cap);
+            }
+            markDirty();
+        }
     } else if (strcmp(type, "accepted") == 0) {
         statusText = "ACCEPTED";
         markDirty();
     } else if (strcmp(type, "cancelled") == 0) {
         statusText = "CANCELLED";
         markDirty();
+    } else if (strcmp(type, "archived") == 0) {
+        const String id = doc["sessionId"] | "";
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (sessions[i].id == id) {
+                sessions.erase(sessions.begin() + static_cast<int>(i));
+                break;
+            }
+        }
+        if (deckSel >= static_cast<int>(sessions.size())) {
+            deckSel = std::max(0, static_cast<int>(sessions.size()) - 1);
+        }
+        if (deckTop > deckSel) deckTop = deckSel;
+        statusText = "ARCHIVED";
+        markDirty();
+        requestSessions();
     } else if (strcmp(type, "stt") == 0) {
         const char* text = doc["text"] | "";
         if (text[0] != '\0') inputInsert(String(text));  // insert at the caret
@@ -490,6 +611,30 @@ void handleMessage(const char* json, size_t length)
         lastError  = doc["error"] | "error";
         statusText = "ERR";
         markDirty();
+    } else if (strcmp(type, "approval") == 0) {
+        const char* id = doc["id"] | "";
+        if (id[0] != '\0' && screen != Screen::kApproval) {
+            approvalId     = id;
+            approvalTool   = doc["tool"] | "tool";
+            approvalReason = doc["reason"] | "";
+            approvalReturn = screen;
+            approvalAt     = millis();
+            approvalHoldAt = 0;
+            approvalArmed  = false;
+            approvalHoldFull = false;
+            screen         = Screen::kApproval;
+            markDirty();
+        }
+    } else if (strcmp(type, "approval.closed") == 0) {
+        const char* id = doc["id"] | "";
+        if (screen == Screen::kApproval && approvalId == id) {
+            screen         = approvalReturn;
+            approvalId     = "";
+            approvalHoldAt = 0;
+            approvalArmed  = false;
+            approvalHoldFull = false;
+            markDirty();
+        }
     }
 
     // The two frames that carry bulk text: log the heap after they are applied,
@@ -513,7 +658,9 @@ void render();  // defined in the rendering section below
 
 void voiceAbort(const char* why)
 {
-    M5.Mic.end();
+    // Do NOT M5.Mic.end() here: tearing the shared I2S/codec down is what
+    // crashed the app on the old timeout path.  Leaving the capture channel up
+    // is safe; the next Fn+V reads it again.
     if (voice != Voice::kIdle) ws.sendText("{\"type\":\"stt.abort\"}");
     voice      = Voice::kIdle;
     statusText = "VOICE FAILED";
@@ -528,7 +675,7 @@ void voiceAbort(const char* why)
 // Its record()/isRecording() request machinery delivers a buffer only every
 // ~3 s here, so the audio is pulled straight off the installed driver with
 // i2s_read() instead: one blocking read per 240 ms block, continuously.
-constexpr size_t   kVoiceSamples = 3840;   // 240 ms at 16 kHz per read/send
+constexpr size_t   kVoiceSamples = 1920;   // 120 ms at 16 kHz per read/send
 constexpr uint32_t kVoiceRate    = 16000;
 constexpr uint32_t kVoiceMaxMs   = 20000;  // hard cap; ENT/Fn+V stops earlier
 
@@ -715,6 +862,11 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
         g_micUp = true;
     }
 
+    // Re-enable the shared RX channel at capture time.  M5Unified's capture
+    // task leaves it stopped between captures; starting it here is what made
+    // repeated captures work without tearing the codec down.
+    i2s_start(g_voicePort);
+
     // Declare the rate the hardware actually produces, not the nominal 16000:
     // the capture loop measures ~14.8 kHz, and telling Vosk 16 kHz makes speech
     // play ~8% fast, which costs recognition accuracy.
@@ -727,12 +879,27 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
     int     sent   = 0;
     int32_t peak   = 0;
     uint32_t totalSamples = 0;
+    uint32_t lastData     = millis();
     const uint32_t start = millis();
     while (millis() - start < maxMs) {
         const uint32_t tRead0 = millis();
-        const size_t got = voiceRead(voiceReadBuf, kVoiceSamples, 500);
+        // Short wait per read: a 500 ms read could sit in the driver past the
+        // no-data deadline and freeze the whole loop.  20 ms lets the guard
+        // below run and turn a dead channel into VOICE FAILED, not offline.
+        const size_t got = voiceRead(voiceReadBuf, kVoiceSamples, 20);
         const uint32_t tRead1 = millis();
-        if (got == 0) continue;
+        if (got == 0) {
+            // If the channel stays dry for two seconds, abort instead of
+            // spinning the full 20 s block: the UI and WS ping must keep going.
+            if (millis() - lastData > 2000) {
+                ws.sendText("{\"type\":\"stt.abort\"}");
+                usbLogf("[voice] no data for 2s, abort");
+                lastError = "no audio";
+                return false;
+            }
+            continue;
+        }
+        lastData = millis();
 
         voiceCondition(voiceReadBuf, got, peak);
         int32_t blockPeak = 0;
@@ -809,9 +976,25 @@ void voiceStart()
     if (voice != Voice::kIdle) return;
 
     voice      = Voice::kRecording;
+    if (!g_micUp) {
+        // First dictation only: the codec needs ~1 s of bring-up.  Say so on
+        // screen and wait for the user to see ENT stop before the capture
+        // starts, instead of eating the first words of a sentence begun now.
+        statusText = "MIC INIT";
+        markDirty();
+        render();
+        if (!voiceI2sBegin()) {
+            voice      = Voice::kIdle;
+            statusText = "VOICE FAILED";
+            lastError  = "mic";
+            markDirty();
+            return;
+        }
+        g_micUp = true;
+    }
     statusText = "ENT stop";
     markDirty();
-    render();  // show LISTENING before the blocking capture
+    render();  // the capture starts after this frame; speak from here
 
     if (voiceReadBuf == nullptr)
         voiceReadBuf = static_cast<int16_t*>(malloc(kVoiceSamples * sizeof(int16_t)));
@@ -885,11 +1068,41 @@ void createSession()
 {
     if (!ws.open()) {
         statusText = "OFFLINE";
+        screen     = newReturn;
         markDirty();
         return;
     }
     statusText = "NEW...";
-    ws.sendText("{\"type\":\"create\"}");
+    String frame = "{\"type\":\"create\",\"control\":\"";
+    frame += newControl == 1 ? "full" : "workspace";
+    frame += "\"}";
+    ws.sendText(frame);
+    screen = newReturn;  // the host's `created` opens the new Session (kChat)
+    markDirty();
+}
+
+/// Fn+N asks for the control boundary first; the Host applies the matching
+/// permission preset when it creates the Session.
+void openNewSession()
+{
+    newReturn  = screen;
+    newControl = 0;
+    screen     = Screen::kNew;
+    markDirty();
+}
+
+/// DSH has no hard delete; archiving hides the Session from the deck.  The
+/// deck asks for a second D so a stray keypress cannot hide a conversation.
+void archiveSelected()
+{
+    if (sessions.empty()) return;
+    if (deckSel < 0 || deckSel >= static_cast<int>(sessions.size())) return;
+    String frame = "{\"type\":\"archive\",\"sessionId\":\"";
+    frame += jsonEscape(sessions[deckSel].id);
+    frame += "\"}";
+    ws.sendText(frame);
+    statusText   = "ARCHIVING...";
+    archiveArmed = false;
     markDirty();
 }
 
@@ -928,6 +1141,32 @@ void handlePress(Point2D_t point)
     char c = static_cast<char>(M5Cardputer.Keyboard.getKey(point));
     const auto ks = M5Cardputer.Keyboard.keysState();
     const bool fn = ks.fn;
+
+    if (screen == Screen::kOta) {
+        // Uploading: no key is accepted at all, including esc.  After an error
+        // the overlay stays so the failure is readable, and esc returns.
+        if (!otaUploading && c == '`') {
+            screen = otaReturn;
+            markDirty();
+        }
+        return;
+    }
+
+    if (screen == Screen::kApproval) {
+        // ENT is deliberately not an edge action: the hold is polled in loop()
+        // so an accidental tap cannot approve.  D rejects, esc defers.
+        if (c == '`') { answerApproval("defer"); return; }
+        if (c == KEY_BACKSPACE) { answerApproval("rejected"); return; }
+        return;
+    }
+
+    if (screen == Screen::kNew) {
+        if (c == '`') { screen = newReturn; markDirty(); return; }
+        if (c == ';') { newControl = 0; markDirty(); return; }
+        if (c == '.') { newControl = 1; markDirty(); return; }
+        if (c == KEY_ENTER) { createSession(); return; }
+        return;
+    }
 
     if (screen == Screen::kConfig) {
         if (c == KEY_ENTER) {
@@ -968,6 +1207,21 @@ void handlePress(Point2D_t point)
     }
 
     if (screen == Screen::kDeck) {
+        // Both the DEL key and the literal D letter archive, because the deck
+        // hint says "D" and the Cardputer labels its delete key differently.
+        if (c == KEY_BACKSPACE || c == 'd' || c == 'D') {
+            if (archiveArmed && millis() - archiveAt < 3000) {
+                archiveSelected();
+            } else {
+                archiveArmed = true;
+                archiveAt    = millis();
+                statusText   = "ARCHIVE? D AGAIN";
+                markDirty();
+            }
+            return;
+        }
+        archiveArmed = false;  // any other key cancels the two-step archive
+
         if (c == KEY_ENTER) {
             openSelected();
             return;
@@ -989,7 +1243,7 @@ void handlePress(Point2D_t point)
             return;
         }
         if (fn) {
-            if (c == 'n' || c == 'N') { createSession(); return; }
+            if (c == 'n' || c == 'N') { openNewSession(); return; }
             if (c == 's' || c == 'S') { requestSessions(); statusText = "REFRESH"; markDirty(); return; }
             if (c == 'c' || c == 'C') {
                 screen      = Screen::kConfig;
@@ -1045,6 +1299,10 @@ void handlePress(Point2D_t point)
             voiceStart();
             return;
         }
+        if (fn && (c == ',' || c == '.')) {
+            inputInsert(String(c));
+            return;
+        }
         if (c == ',') { caretLeft(); return; }
         if (c == '/') { caretRight(); return; }
         if (c >= 32 && c < 127) {
@@ -1075,12 +1333,12 @@ void handlePress(Point2D_t point)
             markDirty();
             return;
         }
-        if (c == 'n' || c == 'N') { createSession(); return; }
-        if (c == 'c' || c == 'C') {
-            screen      = Screen::kConfig;
-            configField = 0;
-            configEdit  = host;
-            markDirty();
+        if (c == 'n' || c == 'N') { openNewSession(); return; }
+        // Comma and period drive the caret/cursor bare, so Fn gives the literal
+        // characters back to the composer (URLs, decimals, prose).
+        if (c == ',' || c == '.') {
+            if (cursor < static_cast<int>(msgs.size())) cursor = static_cast<int>(msgs.size());
+            inputInsert(String(c));
             return;
         }
         if (c == 'x' || c == 'X') { sendCancel(); return; }
@@ -1137,6 +1395,16 @@ void drawHeader()
     if (running) {
         canvas.setTextColor(kAccent, kHead);
         canvas.drawString("RUN", 82, 2);
+        const String tick = tailUtf8(thinkingText, 8);
+        if (!tick.isEmpty()) {
+            // Eight-character thinking ticker: enough to guess what the turn is
+            // doing without turning the header into a transcript.  efontCN_12
+            // so Chinese reasoning renders too; the battery switches back.
+            canvas.setFont(&lgfx::fonts::efontCN_12);
+            canvas.setTextColor(kText, kHead);
+            canvas.drawString(tick, 104, 0);
+            canvas.setTextFont(1);
+        }
     }
     char battery[16];
     snprintf(battery, sizeof(battery), "%d%%", M5.Power.getBatteryLevel());
@@ -1148,15 +1416,38 @@ void drawHints(const char* const* keys, const char* const* labels, int count)
 {
     canvas.drawFastHLine(0, 118, lcd.width(), kDim);
     canvas.setTextFont(1);
+
+    // Low-cost footer: pack the hints into as few pages as fit, then show one
+    // page at a time.  A page advance repaints once every 3 s (the loop marks
+    // dirty), instead of a 120 ms marquee that churned the heap continuously.
+    int starts[8];
+    int pages = 0;
+    int i = 0;
+    while (i < count && pages < 8) {
+        starts[pages++] = i;
+        int x = 3;
+        while (i < count) {
+            const int w = canvas.textWidth(keys[i]) + 3 + canvas.textWidth(labels[i]) + 12;
+            if (x + w > lcd.width() - 4 && x > 3) break;
+            x += w;
+            ++i;
+        }
+    }
+    if (pages == 0) return;
+
+    const int page = static_cast<int>((millis() / 3000) % pages);
     int x = 3;
-    for (int i = 0; i < count; ++i) {
+    for (int k = starts[page]; k < count; ++k) {
+        const int kw = canvas.textWidth(keys[k]);
+        const int lw = canvas.textWidth(labels[k]);
+        const int w  = kw + 3 + lw + 12;
+        if (x + w > lcd.width() - 4 && x > 3) break;
         canvas.setTextColor(kOk, kBg);
-        canvas.drawString(keys[i], x, 122);
-        x += canvas.textWidth(keys[i]) + 3;
+        canvas.drawString(keys[k], x, 122);
+        x += kw + 3;
         canvas.setTextColor(kDim, kBg);
-        canvas.drawString(labels[i], x, 122);
-        x += canvas.textWidth(labels[i]) + 7;
-        if (x > lcd.width() - 20) break;
+        canvas.drawString(labels[k], x, 122);
+        x += lw + 12;
     }
 }
 
@@ -1201,9 +1492,9 @@ void drawDeck()
     }
     canvas.setTextFont(1);
 
-    static const char* const keys[]   = {"FnN", "ENT", ";.", "FnC", "esc"};
-    static const char* const labels[] = {"new", "open", "move", "cfg", "back"};
-    drawHints(keys, labels, 5);
+    static const char* const keys[]   = {"ENT", ";.", "FnN", "FnS", "FnC", "D", "esc"};
+    static const char* const labels[] = {"open", "move", "new", "refresh", "cfg", "archive", "back"};
+    drawHints(keys, labels, 7);
 }
 
 void drawChat()
@@ -1284,9 +1575,9 @@ void drawChat()
     if (onInput && caretOn) canvas.drawFastVLine(caretX, inputY, 11, kAccent);
     canvas.setTextFont(1);
 
-    static const char* const keys[]   = {"ENT", "FnENT", "FnV", "FnX", "esc"};
-    static const char* const labels[] = {"open/send", "edit", "voice", "stop", "back"};
-    drawHints(keys, labels, 5);
+    static const char* const keys[]   = {"ENT", "FnENT", "FnV", "FnX", "FnN", "FnS", ";.", ",/", "esc"};
+    static const char* const labels[] = {"open/send", "edit", "voice", "stop", "new", "deck", "move", "caret", "back"};
+    drawHints(keys, labels, 9);
 }
 
 /// Full-screen reading view: no header, no footer, maximum content per screen.
@@ -1326,14 +1617,12 @@ void drawPreview()
     if (maxScroll > 0) {
         const int page = previewScroll / visible + 1;
         const int pages = maxScroll / visible + 1;
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%d/%d ;. scroll", page, pages);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%d/%d ;. scroll , top / bottom esc", page, pages);
         canvas.drawString(buf, 3, lcd.height() - 10);
     } else {
-        canvas.drawString("esc", 3, lcd.height() - 10);
+        canvas.drawString("ENT/esc back", 3, lcd.height() - 10);
     }
-    canvas.setTextColor(kDim, kBg);
-    canvas.drawRightString("esc", lcd.width() - 3, lcd.height() - 10);
 }
 
 /// Full-screen composer: same content area as the preview, with the caret.
@@ -1373,6 +1662,10 @@ void drawEdit()
     canvas.drawString("FnV", 108, lcd.height() - 10);
     canvas.setTextColor(kDim, kBg);
     canvas.drawString("voice", 128, lcd.height() - 10);
+    canvas.setTextColor(kOk, kBg);
+    canvas.drawString(",/", 158, lcd.height() - 10);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("caret", 174, lcd.height() - 10);
 }
 
 void drawConfig()
@@ -1400,6 +1693,116 @@ void drawConfig()
     canvas.drawString(String("heap ") + String(ESP.getFreeHeap() / 1024) + "K", 3, 100);
 }
 
+/// Full-screen DSH approval prompt.  The turn is blocked while this is up, so
+/// it replaces the header/footer of whatever screen the user was on.
+void drawApproval()
+{
+    canvas.fillScreen(kBg);
+    canvas.fillRect(0, 0, lcd.width(), 13, kHead);
+    canvas.setTextFont(1);
+    canvas.setTextColor(kText, kHead);
+    canvas.drawString("APPROVAL", 3, 2);
+
+    const int left = 45 - static_cast<int>((millis() - approvalAt) / 1000);
+    char timer[16];
+    snprintf(timer, sizeof(timer), "%ds", left > 0 ? left : 0);
+    canvas.setTextColor(left > 10 ? kDim : kWarn, kHead);
+    canvas.drawRightString(timer, lcd.width() - 3, 2);
+
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("TOOL", 4, 17);
+    canvas.setFont(&lgfx::fonts::efontCN_12);
+    canvas.setTextColor(kAccent, kBg);
+    canvas.drawString(truncateUtf8(approvalTool, 15), 40, 15);
+
+    std::vector<String> lines;
+    wrapInto(lines, approvalReason.isEmpty() ? String("no reason given") : approvalReason,
+             "", lcd.width() - 8);
+    canvas.setTextColor(kText, kBg);
+    int y = 30;
+    for (size_t i = 0; i < lines.size() && i < 4; ++i) {
+        canvas.drawString(lines[i], 4, y);
+        y += 12;
+    }
+    canvas.setTextFont(1);
+
+    // Hold-to-allow: the bar fills for ~1.2 s while ENT is down.  A tap does
+    // nothing, so a keystroke already in flight cannot approve a tool.
+    const int barY = 86;
+    canvas.drawRect(4, barY, lcd.width() - 8, 8, kDim);
+    if (approvalHoldAt != 0) {
+        int w = static_cast<int>(millis() - approvalHoldAt) * (lcd.width() - 12) / 1200;
+        if (w > lcd.width() - 12) w = lcd.width() - 12;
+        if (w > 0) canvas.fillRect(6, barY + 2, w, 4, approvalHoldFull ? kWarn : kOk);
+    }
+
+    canvas.setTextColor(kOk, kBg);
+    canvas.drawString("hold ENT", 4, 100);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("allow once", 56, 100);
+
+    canvas.setTextColor(kAccent, kBg);
+    canvas.drawString("hold Fn+ENT", 4, 112);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("full access", 74, 112);
+
+    canvas.setTextColor(kAccent, kBg);
+    canvas.drawString("D", 4, 124);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("reject", 15, 124);
+
+    canvas.setTextColor(kAccent, kBg);
+    canvas.drawString("esc", 66, 124);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("desktop", 90, 124);
+}
+
+/// OTA overlay: one dedicated page, no HARNESS chrome.  While the image is
+/// being written the loop returns before WS/voice/key handling, so this page
+/// and ArduinoOTA.handle() are the only things running.
+void drawOta()
+{
+    if (otaUploading) {
+        flashui::draw(canvas, otaPercent, "DO NOT EXIT");
+        return;
+    }
+    if (otaFailed) {
+        flashui::drawError(canvas, otaStatus);
+        return;
+    }
+    flashui::draw(canvas, otaPercent, "WAITING FOR UPLOAD");
+}
+
+/// New-session control chooser: the boundary is picked before the Session is
+/// created, because the Host applies the matching permission preset at create.
+void drawNew()
+{
+    canvas.fillScreen(kBg);
+    drawHeader();
+    canvas.setTextFont(1);
+    canvas.setTextColor(kText, kBg);
+    canvas.drawString("NEW SESSION", 4, 18);
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("control boundary", 4, 30);
+
+    static const char* const names[2] = {"WORKSPACE WRITE", "FULL ACCESS"};
+    static const char* const notes[2] = {"asks before wider steps", "no approval prompts"};
+    for (int i = 0; i < 2; ++i) {
+        const int  y   = 44 + i * 26;
+        const bool sel = i == newControl;
+        if (sel) canvas.fillRect(0, y - 2, lcd.width(), 24, kBar);
+        canvas.setTextColor(sel ? kAccent : kText, sel ? kBar : kBg);
+        canvas.drawString(names[i], 8, y);
+        canvas.setTextColor(sel ? kText : kDim, sel ? kBar : kBg);
+        canvas.drawString(notes[i], 8, y + 11);
+    }
+
+    canvas.setTextColor(kDim, kBg);
+    canvas.drawString("; . choose", 4, 120);
+    canvas.drawString("ENT create", 78, 120);
+    canvas.drawString("esc back", 160, 120);
+}
+
 void render()
 {
     switch (screen) {
@@ -1408,6 +1811,9 @@ void render()
         case Screen::kPreview: drawPreview(); break;
         case Screen::kEdit: drawEdit(); break;
         case Screen::kConfig: drawConfig(); break;
+        case Screen::kApproval: drawApproval(); break;
+        case Screen::kNew: drawNew(); break;
+        case Screen::kOta: drawOta(); break;
     }
     canvas.pushSprite(&lcd, 0, 0);
     dirty = false;
@@ -1415,6 +1821,57 @@ void render()
 
 // ---------------------------------------------------------------------------
 // wifi / link bring-up
+
+// Start ArduinoOTA as soon as HARNESS has a station link.  Keeping it up in
+// this app is what lets an OTA flash from the HARNESS screen; after the reboot
+// the launcher's stored choice is still HARNESS.
+void startOta()
+{
+    if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+    ArduinoOTA.setHostname("cardputer");
+    ArduinoOTA.setPassword("cardputer-ota");
+    ArduinoOTA.setPort(3232);
+    ArduinoOTA.onStart([]() {
+        otaUploading = true;
+        otaFailed    = false;
+        otaPercent   = 0;
+        snprintf(otaStatus, sizeof(otaStatus), "UPLOADING");
+        otaReturn = screen == Screen::kOta ? otaReturn : screen;
+        screen    = Screen::kOta;
+        kbdClearPresses();
+        markDirty();
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        otaPercent = total ? static_cast<int>(progress * 100 / total) : 0;
+        markDirty();
+    });
+    ArduinoOTA.onEnd([]() {
+        otaUploading = false;
+        otaPercent   = 100;
+        snprintf(otaStatus, sizeof(otaStatus), "DONE - REBOOTING");
+        // Same rising cue as the SETTINGS OTA page.  Best-effort: after a
+        // dictation the microphone owns the shared I2S and the cue is silent;
+        // before it, the speaker is free and it plays.
+        if (!g_micUp) {
+            M5.Speaker.setVolume(160);
+            M5.Speaker.tone(1047, 90);  delay(110);
+            M5.Speaker.tone(1319, 90);  delay(110);
+            M5.Speaker.tone(1568, 90);  delay(110);
+            M5.Speaker.tone(2093, 240); delay(260);
+        }
+        markDirty();
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        otaUploading = false;
+        otaFailed    = true;
+        snprintf(otaStatus, sizeof(otaStatus), "ERROR %d", static_cast<int>(error));
+        kbdClearPresses();
+        markDirty();
+    });
+    ArduinoOTA.begin();
+    otaStarted = true;
+    usbLogf("[ota] ready ip=%s", WiFi.localIP().toString().c_str());
+}
 
 void linkService()
 {
@@ -1451,6 +1908,7 @@ void linkService()
         if (statusText != "NO WIFI") statusText = "NO WIFI";
         return;
     }
+    if (!otaStarted) startOta();
     // Give the station a moment to settle after DHCP before the first TCP
     // connect: a connect issued in that window failed with the 400 ms timeout.
     static uint32_t wifiUpAt = 0;
@@ -1570,23 +2028,72 @@ void loop()
     }
 
     M5Cardputer.update();
+    if (otaStarted) ArduinoOTA.handle();
+
+    // Flashing owns the device: no WS, microphone, chat, keys or marquee.  Only
+    // the OTA callback and the dedicated progress page run until the reboot.
+    if (otaUploading) {
+        if (dirty) render();
+        delay(2);
+        return;
+    }
 
     Point2D_t point;
     while (kbdPopPress(point)) handlePress(point);
 
+    // DSH approval: ENT must be held for ~1.2 s to allow once.  The press edge
+    // alone is intentionally ignored (handlePress), so a key already in flight
+    // when the prompt appears cannot grant a tool.  D and esc are edge actions.
+    if (screen == Screen::kApproval) {
+        static uint32_t lastApprovalPaint = 0;
+        const bool held = M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER);
+        const bool full = held && M5Cardputer.Keyboard.keysState().fn;
+        if (!held) {
+            // Arming needs a release: if ENT was already down when the prompt
+            // arrived, that keystroke must not count toward the hold.
+            approvalArmed = true;
+            if (approvalHoldAt != 0) {
+                approvalHoldAt = 0;
+                approvalHoldFull = false;
+                dirty = true;
+            }
+        } else if (approvalArmed) {
+            if (approvalHoldAt == 0) {
+                approvalHoldAt  = millis();
+                approvalHoldFull = full;
+                dirty = true;
+            } else if (approvalHoldFull != full) {
+                // The chord changed mid-hold; restart so the wrong grant (once
+                // vs full control) can never fire from a mixed hold.
+                approvalHoldAt  = millis();
+                approvalHoldFull = full;
+                dirty = true;
+            } else if (millis() - approvalHoldAt >= 1200) {
+                answerApproval(full ? "full" : "allowed-once");
+            }
+        }
+        if (screen == Screen::kApproval) {
+            const uint32_t now = millis();
+            if (now - lastApprovalPaint >= 200) {
+                lastApprovalPaint = now;
+                dirty = true;
+            }
+            // The Host defers to the Desktop at 45 s; close even if its final
+            // frame was lost with a dropped link.
+            if (now - approvalAt > 48000) {
+                usbLogf("[approval] timeout, closing");
+                screen           = approvalReturn;
+                approvalId       = "";
+                approvalHoldAt   = 0;
+                approvalArmed    = false;
+                approvalHoldFull = false;
+                markDirty();
+            }
+        }
+    }
+
     linkService();
     ws.loop();
-
-    // One-shot mic self-test as soon as the link is up: brings the codec up and
-    // measures the true hardware I2S rate with pure reads. Deliberately NOT a
-    // capture: sending audio here would transcribe room noise into the composer
-    // on every boot.
-    static bool selfTestDone = false;
-    if (!selfTestDone && ws.open()) {
-        selfTestDone = true;
-        if (!g_micUp) g_micUp = voiceI2sBegin();
-        if (g_micUp) voiceSelfTest();
-    }
 
     voiceService();
 
@@ -1595,6 +2102,15 @@ void loop()
         if (millis() - caretAt > 500) {
             caretAt = millis();
             caretOn = !caretOn;
+            markDirty();
+        }
+    }
+
+    // Footer pages advance once every 3 s; one repaint per page, no marquee.
+    if (screen == Screen::kDeck || screen == Screen::kChat) {
+        static uint32_t lastHintPage = 0;
+        if (millis() - lastHintPage >= 3000) {
+            lastHintPage = millis();
             markDirty();
         }
     }

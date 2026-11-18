@@ -166,7 +166,12 @@ class CardputerClient {
     this.followActive = false
     this.deltaBuffer = ''
     this.deltaTimer = null
+    this.thinkingBuffer = ''
+    this.thinkingTimer = null
     this.stt = null
+    this.approval = null
+    this.controls = new Map()
+    this.archived = new Set()
     this.disposed = false
     this.lastSeen = Date.now()
 
@@ -236,13 +241,19 @@ class CardputerClient {
         await this.openSession(frame.sessionId, frame.maxMessages)
         return
       case 'create':
-        await this.createSession(frame.cwd)
+        await this.createSession(frame.cwd, frame.control)
         return
       case 'prompt':
         await this.prompt(frame.sessionId, frame.text)
         return
       case 'cancel':
         await this.cancel(frame.sessionId)
+        return
+      case 'archive':
+        await this.archiveSession(frame.sessionId)
+        return
+      case 'approval.answer':
+        this.answerApproval(frame)
         return
       case 'stt.begin':
         this.sttBegin(frame)
@@ -285,7 +296,12 @@ class CardputerClient {
     const value = await controller.list({}, signal)
     const items = Array.isArray(value && value.items) ? value.items : []
     const max = Math.max(1, Math.min(40, Number(limit) || this.plugin.cfg.listLimit))
-    const rows = items.slice(0, max).map(item => {
+    // list() is the raw Session table: archived Sessions are still in it.  The
+    // Desktop hides them through the workspace baseline, and the deck must do
+    // the same or an archived row reappears on the next refresh.
+    const archived = await this.archivedIds()
+    const visible = items.filter(item => !archived.has(String(item.sessionId)))
+    const rows = visible.slice(0, max).map(item => {
       const projections = item.projections && item.projections.values ? item.projections.values : {}
       const title = typeof projections.title === 'string' ? projections.title : ''
       return {
@@ -305,6 +321,39 @@ class CardputerClient {
     const candidates = rows.filter(row => !row.blank && row.updatedAt > 0).slice(0, this.plugin.cfg.previewLimit)
     await Promise.all(candidates.map(row => this.enrich(row, signal).catch(() => {})))
     this.send({ type: 'sessions', items: rows })
+  }
+
+  /**
+   * Archived Session ids.  `workspaceController.follow`'s baseline is the same
+   * authority the Desktop uses; read its first frame and stop.  The client's own
+   * archive set is the fallback (and covers the instant between archive and the
+   * next list), so a slow/unavailable stream cannot make an archived row show.
+   */
+  async archivedIds() {
+    const ids = new Set(this.archived)
+    const wc = typeof this.plugin.ctx.get === 'function'
+      ? this.plugin.ctx.get('workspaceController')
+      : undefined
+    if (!wc || typeof wc.follow !== 'function') return ids
+    const ac = new AbortController()
+    const collect = (async () => {
+      try {
+        for await (const frame of wc.follow(ac.signal)) {
+          if (frame && frame.type === 'baseline' && frame.value) {
+            for (const id of frame.value.archivedSessionIds || []) ids.add(String(id))
+            break
+          }
+        }
+      } catch {}
+    })()
+    let timer = null
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(resolve, 800)
+    })
+    await Promise.race([collect, timeout])
+    if (timer !== null) clearTimeout(timer)
+    ac.abort()
+    return ids
   }
 
   async enrich(row, signal) {
@@ -342,6 +391,7 @@ class CardputerClient {
     }
     this.followActive = false
     this.flushDelta()
+    this.flushThinking()
   }
 
   async openSession(sessionId, maxMessages) {
@@ -356,11 +406,23 @@ class CardputerClient {
     const controller = this.requireController()
     const state = await controller.state({ sessionId }, new AbortController().signal).catch(() => null)
     this.send({ type: 'status', sessionId, running: state ? state.running === true : false })
-    const messages = Math.max(4, Math.min(60, Number(maxMessages) || this.plugin.cfg.maxMessages))
-    this.startFollow(sessionId, messages)
+    // The device asks for the number of chat *messages* it can show, but
+    // `maxMessages` is a Session-record budget. A turn's tool calls, tool
+    // results and runtime-context user turns consume that budget and are then
+    // filtered out here, so requesting exactly the screen size delivered a
+    // short transcript — sometimes none at all while a turn was running.
+    // Over-fetch records and trim to the requested message count afterwards.
+    const wanted = Math.max(4, Math.min(60, Number(maxMessages) || this.plugin.cfg.maxMessages))
+    // A turn with many tool calls can spend a small record budget before one
+    // chat message is reached, so always ask for the widest page the controller
+    // takes and trim to the requested message count.  The trim keeps the frame
+    // sent to the device — and its JSON heap cost — at the old size.
+    const window = 200
+    this.startFollow(sessionId, window, wanted)
+    this.applyControl(sessionId).catch(() => {})
   }
 
-  startFollow(sessionId, maxMessages) {
+  startFollow(sessionId, window = this.plugin.cfg.maxMessages, wanted = null) {
     const controller = this.requireController()
     const abort = new AbortController()
     this.followAbort = abort
@@ -370,7 +432,7 @@ class CardputerClient {
     const request = {
       address: { kind: 'session', sessionId },
       assistantStream: true,
-      maxMessages,
+      maxMessages: window,
     }
 
     let iterator
@@ -387,7 +449,7 @@ class CardputerClient {
       try {
         for await (const frame of iterator) {
           if (abort.signal.aborted || this.disposed) break
-          this.onFollowFrame(sessionId, frame)
+          this.onFollowFrame(sessionId, frame, wanted)
         }
       } catch (error) {
         if (!abort.signal.aborted && !this.disposed) {
@@ -402,7 +464,7 @@ class CardputerClient {
     })()
   }
 
-  onFollowFrame(sessionId, frame) {
+  onFollowFrame(sessionId, frame, wanted) {
     if (!frame || typeof frame !== 'object') return
 
     if (frame.type === 'snapshot') {
@@ -413,7 +475,9 @@ class CardputerClient {
         type: 'snapshot',
         sessionId,
         cursor: typeof frame.cursor === 'number' ? frame.cursor : 0,
-        messages,
+        // Only the newest rows the device asked for; the larger record window
+        // above exists to survive tool/context records that never become rows.
+        messages: typeof wanted === 'number' ? messages.slice(-wanted) : messages,
       })
       return
     }
@@ -443,6 +507,7 @@ class CardputerClient {
       }
       if (inner.type === 'end') {
         this.flushDelta()
+        this.flushThinking()
         this.send({ type: 'status', sessionId, running: false })
         return
       }
@@ -450,6 +515,11 @@ class CardputerClient {
         const chunk = inner.chunk
         if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
           this.queueDelta(sessionId, chunk.text)
+        } else if (chunk && chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+          // Only the last few characters are shown in the header ticker; this
+          // is not a transcript of the model's reasoning, just a "what is it
+          // doing now" hint on the device.
+          this.queueThinking(sessionId, chunk.text)
         }
       }
     }
@@ -483,17 +553,104 @@ class CardputerClient {
     this.send({ type: 'delta', sessionId: this.deltaSession ?? this.sessionId, text })
   }
 
+  /**
+   * Coalesce reasoning-delta chunks into a short "thinking" frame.  The device
+   * only prints the last few characters, so a bounded tail is enough and keeps
+   * the 240x135 UI's heap small.
+   */
+  queueThinking(sessionId, text) {
+    this.thinkingSession = sessionId
+    this.thinkingBuffer += text
+    if (this.thinkingBuffer.length > 512) {
+      this.thinkingBuffer = this.thinkingBuffer.slice(-512)
+    }
+    if (this.thinkingTimer === null) {
+      this.thinkingTimer = setTimeout(() => {
+        this.thinkingTimer = null
+        this.flushThinking()
+      }, 120)
+    }
+  }
+
+  flushThinking() {
+    if (this.thinkingTimer !== null) {
+      clearTimeout(this.thinkingTimer)
+      this.thinkingTimer = null
+    }
+    if (this.thinkingBuffer.length === 0) return
+    const text = this.thinkingBuffer
+    this.thinkingBuffer = ''
+    this.send({ type: 'thinking', sessionId: this.thinkingSession ?? this.sessionId, text })
+  }
+
   // -- actions --------------------------------------------------------------
 
-  async createSession(cwd) {
+  async createSession(cwd, control) {
     const controller = this.requireController()
     const request = {}
     const target = typeof cwd === 'string' && cwd.length > 0 ? cwd : this.plugin.cfg.workspace
     if (typeof target === 'string' && target.length > 0) request.cwd = target
     const value = await controller.create(request)
     const sessionId = String(value.sessionId)
+    if (control === 'full' || control === 'workspace') {
+      this.controls.set(sessionId, control)
+    }
     this.send({ type: 'created', sessionId, shortId: shortId(sessionId) })
     await this.openSession(sessionId)
+  }
+
+  /**
+   * Apply a new-Session control choice once its Agent is resolvable.  The
+   * device picks workspace-write or full access in the Fn+N chooser; the
+   * Session's permission preset is set here, before the first prompt, so the
+   * whole conversation runs under the chosen boundary.
+   */
+  async applyControl(sessionId) {
+    const control = this.controls.get(sessionId)
+    if (!control) return
+    const presets = typeof this.plugin.ctx.get === 'function'
+      ? this.plugin.ctx.get('permissionPresets')
+      : undefined
+    if (!presets) return
+    const controller = this.requireController()
+    const resolved = await controller.resolveAgent(sessionId).catch(() => null)
+    const agent = resolved && resolved.agent
+    if (!agent || !agent.session) return
+    const wantSandbox = control === 'full' ? 'danger-full-access' : 'workspace-write'
+    const wantApproval = control === 'full' ? 'never' : 'ask'
+    let catalog
+    try {
+      catalog = presets.catalog()
+    } catch {
+      return
+    }
+    let chosen = null
+    for (const option of Array.isArray(catalog && catalog.options) ? catalog.options : []) {
+      if (!option || typeof option.value !== 'string') continue
+      let spec
+      try {
+        spec = presets.resolve(option.value)
+      } catch {
+        continue
+      }
+      if (!spec || spec.sandbox !== wantSandbox) continue
+      if (chosen === null) chosen = option
+      if (spec.approval === wantApproval) {
+        chosen = option
+        break
+      }
+    }
+    if (!chosen) {
+      this.plugin.log.warn(`new session ${sessionId}: no ${wantSandbox} preset`)
+      return
+    }
+    try {
+      presets.set(agent.session, chosen.value)
+      this.controls.delete(sessionId)
+      this.plugin.log.info(`new session ${sessionId} preset=${chosen.value} control=${control}`)
+    } catch (error) {
+      this.plugin.log.warn(`new session ${sessionId} preset: ${String((error && error.message) || error)}`)
+    }
   }
 
   async prompt(sessionId, text) {
@@ -507,6 +664,7 @@ class CardputerClient {
       return
     }
     const controller = this.requireController()
+    await this.applyControl(target).catch(() => {})
     const value = await controller.prompt(
       {
         requestId: `cardputer-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -533,6 +691,146 @@ class CardputerClient {
     this.send({ type: 'cancelled', sessionId: target, accepted: value ? value.accepted === true : false })
   }
 
+  /// Archive one Session (DSH has no hard delete).  stopActivity lets an archive
+  /// of a still-running Session settle instead of failing.
+  async archiveSession(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      this.send({ type: 'error', error: 'sessionId required' })
+      return
+    }
+    const workspace = typeof this.plugin.ctx.get === 'function'
+      ? this.plugin.ctx.get('workspaceController')
+      : undefined
+    if (!workspace || typeof workspace.archiveSession !== 'function') {
+      this.send({ type: 'error', error: 'archive unavailable' })
+      return
+    }
+    try {
+      const value = await workspace.archiveSession({ sessionId, stopActivity: true })
+      const count = Array.isArray(value && value.archivedSessionIds) ? value.archivedSessionIds.length : 0
+      this.archived.add(sessionId)
+      this.plugin.log.info(`archived ${sessionId} total=${count}`)
+      this.send({ type: 'archived', sessionId, count })
+    } catch (error) {
+      this.fail(error)
+    }
+  }
+
+  // -- tool approvals -------------------------------------------------------
+
+  /** True when this device is the one watching the requesting Session. */
+  canApprove(sessionId) {
+    return !this.disposed && typeof sessionId === 'string' && this.sessionId === sessionId
+  }
+
+  /**
+   * Offer one tool approval to the device. Resolves null to fall through to the
+   * Desktop answerer, so a walk-away, a defer, or a timeout never blocks the
+   * turn; resolves 'allowed-once'/'rejected' when the device decides.
+   */
+  askApproval(request) {
+    if (!this.canApprove(request.agent && request.agent.id)) return null
+    if (this.approval !== null) return null
+    const id = `ap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const display = request.displayReason
+    const reason = typeof display === 'string'
+      ? display
+      : (display && (display.zh || display.en)) || request.reason || ''
+    return new Promise(resolve => {
+      let settled = false
+      const finish = outcome => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (request.signal) request.signal.removeEventListener('abort', onAbort)
+        this.approval = null
+        this.plugin.log.info(`approval ${id} -> ${outcome === null ? 'desktop' : outcome}`)
+        resolve(outcome)
+      }
+      const close = () => this.send({ type: 'approval.closed', id })
+      const onAbort = () => {
+        close()
+        // Cancelled, not deferred: next() would show a dead prompt on the
+        // Desktop after the turn has already moved on.
+        finish('cancelled')
+      }
+      // The device shows 45 s; leave a little slack before taking the prompt
+      // back so a last-second answer still wins.
+      const timer = setTimeout(() => {
+        close()
+        finish(null)
+      }, 45000)
+      this.approval = { id, finish, agent: request.agent }
+      if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true })
+      this.send({
+        type: 'approval',
+        id,
+        tool: String(request.toolName || 'tool'),
+        reason: String(reason).slice(0, 200),
+        sessionId: request.agent.id,
+      })
+      this.plugin.log.info(`approval ${id} ask tool=${String(request.toolName || '?')}`)
+    })
+  }
+
+  /**
+   * Widen one Session to the deployment's full-access preset.  Called when the
+   * device answers an approval with "full": the pending tool call is granted
+   * once, and every later call runs under the widened preset (normally also
+   * approval=never), so the user is not asked again.
+   */
+  grantFullControl(agent) {
+    try {
+      const presets = typeof this.plugin.ctx.get === 'function'
+        ? this.plugin.ctx.get('permissionPresets')
+        : undefined
+      if (!presets || !agent || !agent.session) return false
+      const catalog = presets.catalog()
+      const options = Array.isArray(catalog && catalog.options) ? catalog.options : []
+      let chosen = null
+      for (const option of options) {
+        if (!option || typeof option.value !== 'string') continue
+        let spec
+        try {
+          spec = presets.resolve(option.value)
+        } catch {
+          continue
+        }
+        if (!spec || spec.sandbox !== 'danger-full-access') continue
+        if (chosen === null) chosen = option
+        if (spec.approval === 'never') {
+          chosen = option
+          break
+        }
+      }
+      if (chosen === null) return false
+      presets.set(agent.session, chosen.value)
+      this.plugin.log.info(`preset ${chosen.value} (full access) for ${agent.id}`)
+      return true
+    } catch (error) {
+      this.plugin.log.warn(`full control: ${String((error && error.message) || error)}`)
+      return false
+    }
+  }
+
+  answerApproval(frame) {
+    const pending = this.approval
+    if (!pending || frame.id !== pending.id) return
+    const decision = frame.decision
+    if (decision === 'defer') {
+      pending.finish(null)
+    } else if (decision === 'full') {
+      // Grant the waiting call once and widen the Session for everything after
+      // it.  If no full-access preset exists, allow the one call and leave the
+      // policy alone rather than silently rejecting the turn.
+      const widened = this.grantFullControl(pending.agent)
+      this.plugin.log.info(`approval ${pending.id} full-control=${widened ? 'on' : 'unavailable'}`)
+      pending.finish('allowed-once')
+    } else if (decision === 'allowed-once' || decision === 'rejected') {
+      pending.finish(decision)
+    }
+  }
+
   // -- speech to text -------------------------------------------------------
 
   sttBegin(frame) {
@@ -543,6 +841,7 @@ class CardputerClient {
       chunks: [],
       bytes: 0,
     }
+    this.plugin.log.info(`stt begin rate=${this.stt.rate}`)
     this.send({ type: 'stt.ready' })
   }
 
@@ -564,12 +863,17 @@ class CardputerClient {
       this.send({ type: 'stt.error', error: 'audio too large' })
       return
     }
+    if (this.stt.chunks.length === 0) this.plugin.log.info('stt first chunk')
     this.stt.chunks.push(buffer)
+    if (this.stt.chunks.length % 10 === 0) {
+      this.plugin.log.info(`stt chunks=${this.stt.chunks.length} bytes=${this.stt.bytes}`)
+    }
   }
 
   async sttEnd() {
     const session = this.stt
     this.stt = null
+    this.plugin.log.info(`stt end bytes=${session ? session.bytes : 0}`)
     if (!session || session.bytes === 0) {
       this.send({ type: 'stt.error', error: 'no audio' })
       return
@@ -601,8 +905,13 @@ class CardputerClient {
     pcm.copy(wav, 44)
 
     const result = await this.plugin.transcribe(wav, session.rate)
-    if (result.error) this.send({ type: 'stt.error', error: result.error })
-    else this.send({ type: 'stt', text: result.text })
+    if (result.error) {
+      this.plugin.log.warn(`stt failed: ${result.error}`)
+      this.send({ type: 'stt.error', error: result.error })
+    } else {
+      this.plugin.log.info(`stt ok len=${String(result.text || '').length}`)
+      this.send({ type: 'stt', text: result.text })
+    }
   }
 
   dispose() {
@@ -614,6 +923,11 @@ class CardputerClient {
     }
     this.stopFollow()
     this.stt = null
+    if (this.approval !== null) {
+      const pending = this.approval
+      this.approval = null
+      pending.finish(null)
+    }
   }
 }
 
@@ -628,6 +942,30 @@ export function apply(ctx, config) {
   const clients = new Set()
   const cleanups = new Set()
   const previewCache = new Map()
+
+  // DSH tool approvals: offer them to the one Cardputer watching the Session.
+  // `prepend` is required: the Desktop answerer (api-remotes) registers first
+  // and would otherwise take the request and wait on the Web UI, so the device
+  // would never see it.  Deferring or timing out calls next(), which hands the
+  // prompt back to the Desktop.
+  ctx.on(
+    'approval/request',
+    (request, next) => {
+      if (!request || !request.agent) return next()
+      let client = null
+      for (const candidate of clients) {
+        if (candidate.canApprove(request.agent.id)) {
+          client = candidate
+          break
+        }
+      }
+      if (!client) return next()
+      const pending = client.askApproval(request)
+      if (pending === null) return next()
+      return pending.then(outcome => (outcome === null ? next() : outcome))
+    },
+    { prepend: true },
+  )
 
   const plugin = {
     ctx,
