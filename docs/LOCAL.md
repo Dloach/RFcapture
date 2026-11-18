@@ -1,6 +1,6 @@
-# FILES / BADUSB / USB DISK / DISPLAY-POWER
+# FILES / USB DISK / DISPLAY-POWER
 
-这四个本地功能都不碰 CC1101 / ST25R3916：FILES、BADUSB、USB DISK 只初始化 TF 卡，
+这三个本地功能都不碰 CC1101 / ST25R3916：FILES、USB DISK 只初始化 TF 卡，
 DISPLAY / POWER 是 SETTINGS 内部页。
 
 ## FILES
@@ -20,59 +20,6 @@ DISPLAY / POWER 是 SETTINGS 内部页。
 - 二进制文件显示为空/不可读；
 - 不支持改名、复制、移动、新建目录；
 - SPIFFS 没有真正的目录层级，切换后按根目录处理。
-
-## BADUSB
-
-入口：launcher → **BADUSB**。
-
-首次进入是授权警告，`ENT` 接受，`esc` 退出。脚本放在 TF 卡：
-
-```text
-/badusb/*.txt
-```
-
-选中脚本 `ENT` 执行；执行中 `Fn+BKSP` / `` ` `` 中止。
-
-### 支持的 DuckyScript 子集
-
-```text
-REM comment
-DELAY 500
-DEFAULTDELAY 30
-STRING Hello from Cardputer
-ENTER
-TAB
-ESC
-BACKSPACE
-SPACE
-UP / DOWN / LEFT / RIGHT
-HOME / END / PAGEUP / PAGEDOWN
-DELETE
-CAPSLOCK
-F1 .. F12
-CTRL / SHIFT / ALT / GUI + key
-```
-
-示例：
-
-```text
-REM open Run dialog and type a command
-DELAY 500
-GUI r
-DELAY 500
-STRING notepad
-ENTER
-DELAY 800
-STRING hello
-```
-
-注意：
-
-- **仅用于你拥有或明确授权的设备**；
-- 当前只支持 US 键盘布局；
-- 没有变量、条件、循环、文件读取等完整 DuckyScript 语义；
-- 执行时 Cardputer 作为 USB HID 键盘，目标 PC 若弹出信任/驱动提示需先处理；
-- 不要在不可信主机上运行脚本。
 
 ## USB DISK
 

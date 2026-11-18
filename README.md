@@ -1,4 +1,4 @@
-# Cardputer ADV + CAP.CC1101：RF / IR / NFC / 键盘 / WiFi / SSH / 文件 / BadUSB / U 盘
+# Cardputer ADV + CAP.CC1101：RF / IR / NFC / 键盘 / WiFi / SSH / 文件 / U 盘
 
 M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载红外 LED
 （G44）和板载键盘做：
@@ -18,10 +18,9 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
 - **SSH**：在 WiFi 上连 SSH 服务器，带 40×13 终端；
 - **HARNESS**：Cardputer 直连 DeepSeek Harness；首页为会话列表（标题+预览、可滚动），`Fn+N` 新建、`Fn+V` 语音；
 - **FILES**：TF / SPIFFS 文件浏览、文本查看、删除；
-- **BADUSB**：从 TF 读取 DuckyScript 子集，作为 USB HID 键盘执行；
 - **USB DISK**：把整张 TF 卡作为 USB MSC 盘暴露给电脑。
 
-系统是 launcher 十二功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
+系统是 launcher 十一功能（可滚动）+ 右侧 3×3 快捷九宫格；每个功能一次重启，避免 CC1101
 （SPI 模式 0）、ST25R3916（模式 1）和 TF 卡（模式 0）在同一总线上互相锁死。
 
 ## 功能
@@ -73,10 +72,6 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
   - `D` 连按两次删除文件，不支持目录递归删除；
   - SPIFFS 挂不上时不再自动格式化：屏幕会提示，`F` 连按两次才格式化（会清空）；
   - 详细说明见 [docs/LOCAL.md](docs/LOCAL.md)。
-- **BADUSB**
-  - 从 TF `/badusb/*.txt` 读取 DuckyScript 子集；
-  - USB HID 键盘输出，仅限授权设备；
-  - 支持 `STRING / DELAY / DEFAULTDELAY / ENTER / TAB / ESC / 方向键 / F1–F12 / 组合键`。
 - **USB DISK**
   - 独立启动模式，把 TF 卡作为 USB MSC 盘；
   - 电脑直接挂载、复制、删除文件；
@@ -165,7 +160,7 @@ cardputer/
 ├── boards/cardputer_adv.json   板卡定义（8 MB Flash，无 PSRAM）
 ├── src/
 │   ├── main.cpp                启动分发
-│   ├── launcher.*              launcher 十二功能（滚动）+ 九宫格
+│   ├── launcher.*              launcher 十一功能（滚动）+ 九宫格
 │   ├── drum_app.*              8 轨 16-step 合成鼓机
 │   ├── app.*                   RF 首页 / 采集 / 发送 / SCAN
 │   ├── ir_app.*                IR 首页 / 码库 / TF 遥控 / 学习 / 通用 / 设置
@@ -209,7 +204,7 @@ cardputer/
     ├── SSH.md                  SSH profile / host key / 终端说明
     ├── IR.md                   红外发送 / 学习 / Flipper .ir 兼容性
     ├── OTA.md                  无线烧录步骤与故障排查
-    ├── LOCAL.md                FILES / BADUSB / 显示与电源
+    ├── LOCAL.md                FILES / 显示与电源
     ├── RF-LAB.md               频谱 / .sub / 生成 / 调制分析 / 编辑
     ├── WEB-REC.md              Web 文件管理 / 录音
     ├── DRUM.md                 8 轨 16-step 合成鼓机

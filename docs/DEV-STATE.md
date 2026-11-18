@@ -12,7 +12,7 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 
 | 主题 | 当前结论 |
 |---|---|
-| 功能结构 | launcher **十二功能** **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / HARNESS / FILES / BADUSB / USB DISK / WEB FILES / RECORDER / DRUM / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；**RF LAB 已并入 RF TOOLS 首页**（`CAPTURE / SEND / SCAN RF / RF LAB`，第 4 项重启进 `kAppRfLab`）；**IR TOOLS 已从固件移除**（源码保留，`env:cardputer-ir` 编回） |
+| 功能结构 | launcher **十一功能** **RF TOOLS / NFC TOOLS / KEYBOARD / SSH / HARNESS / FILES / USB DISK / WEB FILES / RECORDER / DRUM / SETTINGS**，左侧 4 行滚动 + 右侧 3×3 九宫格；**RF LAB 已并入 RF TOOLS 首页**（`CAPTURE / SEND / SCAN RF / RF LAB`，第 4 项重启进 `kAppRfLab`）；**IR TOOLS 已从固件移除**（源码保留，`env:cardputer-ir` 编回） |
 | IR TOOLS | **2026-11-16 已从出货固件移除**（源码保留、`env:cardputer-ir` 可编回）：发射链已证实（手机摄像头能看到 LED），但空调本体始终没被触发，机型变体没法在无接收模块时确认。详见下一条与 `docs/IR.md`、§15 |
 | IR 协议 | G44 只有发射 LED，板载无接收头（原理图 IR1 + R14 22 Ω 证实）；38 kHz 由 RMT 硬件调制；协议 NEC/NECext/Samsung32/RC5/RC5X/RC6/SIRC/Kaseikyo/Gree(格力) + raw，兼容 Flipper `.ir`；学习需外接 38 kHz 模块（G1/G2） |
 | RF LAB | 频谱瀑布、`.sub` 导入导出、EV1527/PT2262/CAME/Nice 生成、包络调制分析、信号编辑/重发/频偏；详见 `docs/RF-LAB.md` |
@@ -21,7 +21,6 @@ macOS 是 `/Volumes/Project/2026/cardputer`，Windows 上映射成 `Y:\2026\card
 | RF 首页 | 只有 **CAPTURE / SEND / SCAN RF** 三项；BACKUP 已移入 SETTINGS |
 | KEYBOARD | USB mode **0**（TinyUSB CDC + HID）或 BLE HID `Cardputer-KB`；键位映射见 §0.1 |
 | FILES | TF/SPIFFS 浏览、文本查看、双击 D 删除文件；不递归删目录 |
-| BADUSB | TF `/badusb/*.txt` DuckyScript 子集，USB HID 输出；仅授权设备 |
 | USB DISK | 独立启动模式，TF 卡作 USB MSC；core `USBMSC` + `SD.readRAW/writeRAW`，必须电脑安全弹出 |
 | SETTINGS / DISPLAY | 背光 10–100%、超时 OFF/15/30/60/120s、电池百分比/电压/充电；NVS `ui` |
 | SETTINGS / WIFI | 异步扫描 2.4 GHz、密码连接、NVS 保存 5 个网络、启动自动连接；`TEST CONNECTION` 验证 `example.com:80` |

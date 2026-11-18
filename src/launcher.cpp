@@ -52,7 +52,7 @@ bool wifiStarted       = false;
 constexpr int kMenuVisible = 4;
 const char* const kMenuItems[] = {
     "RF TOOLS", "NFC TOOLS", "KEYBOARD", "SSH", "HARNESS", "FILES",
-    "BADUSB", "USB DISK", "WEB FILES", "RECORDER", "DRUM", "SETTINGS",
+    "USB DISK", "WEB FILES", "RECORDER", "DRUM", "SETTINGS",
 #if ENABLE_IR_TOOLS
     "IR TOOLS",
 #endif
@@ -60,7 +60,7 @@ const char* const kMenuItems[] = {
 constexpr int kMenuItemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
 const App kMenuApps[] = {
     kAppRf, kAppNfc, kAppKbd, kAppSsh, kAppHarness, kAppFiles,
-    kAppBadUsb, kAppUsbDisk, kAppWeb, kAppRec, kAppDrum, kAppSettings,
+    kAppUsbDisk, kAppWeb, kAppRec, kAppDrum, kAppSettings,
 #if ENABLE_IR_TOOLS
     kAppIr,
 #endif
@@ -277,7 +277,7 @@ constexpr int kBootBarW = 192;
 constexpr int kBootBarH = 14;
 
 const char* const kBootName[] = {"MENU", "RF TOOLS", "NFC TOOLS", "BACKUP", "KEYBOARD", "SETTINGS",
-                                 "SSH", "FILES", "BADUSB", "USB DISK", "RF LAB", "WEB FILES",
+                                 "SSH", "FILES", "MENU", "USB DISK", "RF LAB", "WEB FILES",
                                  "RECORDER", "HARNESS", "IR TOOLS", "DRUM"};
 
 void drawBootBase(App app)

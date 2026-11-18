@@ -32,7 +32,8 @@ enum App : uint8_t {
     kAppSettings = 5,  // WiFi settings and future system settings
     kAppSsh      = 6,  // SSH client over WiFi
     kAppFiles    = 7,  // TF/SPIFFS file browser
-    kAppBadUsb   = 8,  // DuckyScript over USB HID
+    // 8 was BADUSB; the numeric values above 8 stay fixed because they may be
+    // stored in NVS appboot.
     kAppUsbDisk  = 9,  // TF card as USB MSC drive
     kAppRfLab    = 10, // spectrum / sub import / generator / modulation lab
     kAppWeb      = 11, // WiFi HTTP file manager

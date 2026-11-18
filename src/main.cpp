@@ -17,7 +17,6 @@
 
 #include "app.h"
 #include "backup_app.h"
-#include "badusb_app.h"
 #include "files_app.h"
 #include "drum_app.h"
 #include "harness_app.h"
@@ -43,7 +42,7 @@
 namespace {
 
 enum class Running : uint8_t {
-    kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kBadUsb, kUsbDisk, kWeb,
+    kMenu, kRf, kRfLab, kNfc, kBackup, kKbd, kSettings, kSsh, kFiles, kUsbDisk, kWeb,
     kRec, kHarness, kDrum,
 #if ENABLE_IR_TOOLS
     kIr,
@@ -144,11 +143,6 @@ void setup()
             filesapp::setup();
             break;
 
-        case launcher::kAppBadUsb:
-            g_running = Running::kBadUsb;
-            badusbapp::setup();
-            break;
-
         case launcher::kAppUsbDisk:
             g_running = Running::kUsbDisk;
             usbdiskapp::setup();
@@ -226,9 +220,6 @@ void loop()
             break;
         case Running::kFiles:
             filesapp::loop();
-            break;
-        case Running::kBadUsb:
-            badusbapp::loop();
             break;
         case Running::kUsbDisk:
             usbdiskapp::loop();
