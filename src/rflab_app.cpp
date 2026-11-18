@@ -402,9 +402,21 @@ void sendSignal(const rfsub::Signal& sig, int repeats)
     if (sig.count < 8) return;
     rf_.setBand(sig.band);
     rx_.suspend();
+    // Same sequence as App::transmit(): setBand()/tuneTo() both leave the
+    // CC1101 in RX, so without enterTx() (async-TX PKTCTRL0 + OOK PATABLE +
+    // STX strobe) nothing goes on air while the RMT drives GDO0 against the
+    // chip's own output driver.
+    rf_.enterTx();
+    delay(3);
     tx_.send(sig.pulses, sig.count, repeats, 0);
-    rx_.resume();
+    // The PA stage can leave the chip in an odd state; re-enter RX and
+    // re-apply the lab band before listening again, exactly the way
+    // transmit() recovers.
+    rf_.enterRx();
+    delay(2);
     rf_.setBand(band);
+    rf_.enterRx();
+    rx_.resume();
 }
 
 // ---------------------------------------------------------------------------
@@ -843,9 +855,16 @@ void handleEdit(uint32_t p)
             rf_.setBand(s.band);
             rf_.tuneTo(s.band, rfsub::bandHz(s.band) + editOffset);
             rx_.suspend();
+            // tuneTo() parks the chip in RX; only enterTx() puts the frame on
+            // air, same as sendSignal() and App::transmit().
+            rf_.enterTx();
+            delay(3);
             tx_.send(s.pulses, s.count, editRepeat, 0);
+            rf_.enterRx();
+            delay(2);
             rx_.resume();
             rf_.setBand(band);
+            rf_.enterRx();
             snprintf(note, sizeof(note), "SENT x%d", editRepeat);
         }
         dirty = true;
