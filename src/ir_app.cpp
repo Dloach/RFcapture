@@ -335,7 +335,7 @@ void drawMine()
 
 bool exportLibrary()
 {
-    if (!sdmount::ensure(false)) {
+    if (!sdmount::ensure()) {
         std::snprintf(note, sizeof(note), "NO TF CARD");
         return false;
     }
@@ -444,7 +444,7 @@ void refreshFiles()
     fsTop   = 0;
     note[0] = 0;
 
-    if (!sdmount::ensure(false)) {
+    if (!sdmount::ensure()) {
         std::snprintf(note, sizeof(note), "NO TF CARD");
         return;
     }
@@ -787,7 +787,7 @@ void saveLearned()
     }
 
     // Unknown protocol: the only place it fits is a raw `.ir` file.
-    if (!sdmount::ensure(false)) {
+    if (!sdmount::ensure()) {
         std::snprintf(note, sizeof(note), "NO TF CARD");
         dirty = true;
         return;

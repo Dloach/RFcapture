@@ -263,7 +263,7 @@ void refreshSub()
     subCount = 0;
     subSel = 0;
     subTop = 0;
-    if (!sdmount::ensure(false)) {
+    if (!sdmount::ensure()) {
         snprintf(note, sizeof(note), "NO TF CARD");
         return;
     }
@@ -340,7 +340,7 @@ void importSub()
 
 void exportSaved()
 {
-    if (!sdmount::ensure(false)) {
+    if (!sdmount::ensure()) {
         snprintf(note, sizeof(note), "NO TF CARD");
         dirty = true;
         return;
@@ -839,7 +839,7 @@ void handleEdit(uint32_t p)
         dirty = true;
     }
     if (p & kExport) {
-        if (editTarget >= 0 && editTarget < saved_.size() && sdmount::ensure(false)) {
+        if (editTarget >= 0 && editTarget < saved_.size() && sdmount::ensure()) {
             char name[40], path[80];
             rfsub::safeName(saved_.at(editTarget).name, name, sizeof(name));
             snprintf(path, sizeof(path), "/subghz/%s.sub", name);

@@ -25,7 +25,13 @@ inline int8_t boardCs()
 // Mounts the card if it is not already mounted.  Returns true when a card is
 // usable.  Prints one line per attempt: on hardware problems the print is the
 // only evidence there is.
-inline bool ensure(const bool cutRadioPower = false)
+//
+// The module's power is never cut here: while POWER_EN is low the live SPI
+// pins feed the chips through their pin-clamp diodes, the rail never
+// collapses, and the chips come back half-powered and deaf for the rest of
+// the power cycle.  Driving both CS lines high deselects them cleanly, which
+// is what the body below does.
+inline bool ensure()
 {
     if (SD.cardType() != CARD_NONE) return true;
 

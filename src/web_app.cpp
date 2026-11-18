@@ -439,7 +439,7 @@ void setup()
     lcd.setTextWrap(false);
     lcd.fillScreen(kBg);
 
-    sdOk = sdmount::ensure(false);
+    sdOk = sdmount::ensure();
     if (!sdOk) {
         snprintf(status, sizeof(status), "NO TF CARD");
         draw();

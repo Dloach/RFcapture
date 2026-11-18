@@ -183,7 +183,7 @@ void refresh()
     deleteArmed = false;
 
     if (storage == Storage::kSd) {
-        sdOk = sdmount::ensure(false);
+        sdOk = sdmount::ensure();
         if (!sdOk) {
             snprintf(note, sizeof(note), "NO TF CARD");
             dirty = true;

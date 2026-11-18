@@ -265,7 +265,7 @@ void setup()
     lcd.setTextSize(1);
     lcd.setTextWrap(false);
 
-    sdOk = sdmount::ensure(false);
+    sdOk = sdmount::ensure();
     if (!sdOk) {
         draw();
         return;

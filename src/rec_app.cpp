@@ -540,7 +540,7 @@ void setup()
     lcd.fillScreen(kBg);
     loadVolume();
 
-    sdOk = sdmount::ensure(false);
+    sdOk = sdmount::ensure();
     if (!sdOk) {
         snprintf(status, sizeof(status), "NO TF CARD");
     } else {
