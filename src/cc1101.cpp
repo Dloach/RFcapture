@@ -17,11 +17,22 @@ struct RegVal {
 // silent on this module.
 const RegVal kConfig[] = {
     {0x01, 0x2E},  // IOCFG1
+    {0x02, 0x0D},  // IOCFG0 : async serial data output.  The SRES inside
+                    // setBand() resets this to 0x3F -- a 135 kHz clock on
+                    // GDO0 -- so the restore has to be part of the base
+                    // config, or every retune leaves a fake-edge stream
+                    // feeding the RX interrupt until somebody calls
+                    // enterRx() (the RF LAB setup page used to sit in that
+                    // state).
     {0x03, 0x0F},  // FIFOTHR
     {0x04, 0x12},  // SYNC1
     {0x05, 0xAD},  // SYNC0
     {0x06, 0xFF},  // PKTLEN
     {0x07, 0x64},  // PKTCTRL1
+    {0x08, 0x32},  // PKTCTRL0 : async serial mode (no FIFO).  Same reason as
+                    // IOCFG0: SRES restores the 0x45 default and only
+                    // enterRx()/enterTx() used to put it back, so the chip
+                    // came out of setBand() still in FIFO mode.
     {0x0A, 0x00},  // CHANNR
     {0x0B, 0x0F},  // FSCTRL1
     {0x0C, 0x00},  // FSCTRL0
