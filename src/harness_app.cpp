@@ -31,6 +31,7 @@
 #include "harness_ws.h"
 #include "flash_ui.h"
 #include "launcher.h"
+#include "pinyin_data.h"
 #include "polling_keyboard.h"
 #include "rf_config.h"
 #include "usb_log.h"
@@ -136,6 +137,13 @@ String input;
 String lastError;
 int    configField = 0;
 String configEdit;
+
+// Pinyin IME: one syllable is composed at a time; the candidate row replaces
+// the footer hints while composing.  Fn+Space toggles Chinese/English.
+bool   imeChinese = false;
+String imeBuffer;
+int    imePage    = 0;
+constexpr int kImePerPage = 5;
 
 bool wifiStarted = false;
 bool wsStarted   = false;
@@ -374,6 +382,117 @@ void inputBackspace()
     caretOn = true;
     markDirty();
 }
+
+// --- pinyin IME --------------------------------------------------------------
+// Table: 413 syllables / 6763 GB2312 characters, from RadioDisney/CardputerDict
+// (MIT), itself generated from mozillazg/pinyin-data (MIT).
+
+const PinyinEntry* imeEntry()
+{
+    if (imeBuffer.isEmpty()) return nullptr;
+    for (const auto& entry : kPinyin) {
+        if (imeBuffer == entry.code) return &entry;
+    }
+    return nullptr;
+}
+
+int imeCandidateCount()
+{
+    const PinyinEntry* entry = imeEntry();
+    if (entry == nullptr) return 0;
+    int count = 0;
+    const char* p = entry->candidates;
+    while (*p != '\0') {
+        const int len = utf8Len(static_cast<unsigned char>(*p));
+        if (len <= 0) break;
+        p += len;
+        ++count;
+    }
+    return count;
+}
+
+String imeCandidateAt(int index)
+{
+    const PinyinEntry* entry = imeEntry();
+    if (entry == nullptr || index < 0) return String();
+    const char* p = entry->candidates;
+    int i = 0;
+    while (*p != '\0') {
+        const int len = utf8Len(static_cast<unsigned char>(*p));
+        if (len <= 0) break;
+        if (i == index) {
+            String ch;
+            ch.reserve(len);
+            for (int k = 0; k < len; ++k) ch += p[k];
+            return ch;
+        }
+        p += len;
+        ++i;
+    }
+    return String();
+}
+
+void imeAppend(char c)
+{
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (c < 'a' || c > 'z') return;
+    if (cursor < static_cast<int>(msgs.size())) cursor = static_cast<int>(msgs.size());
+    if (imeBuffer.length() < 16) imeBuffer += c;
+    imePage = 0;
+    markDirty();
+}
+
+void imeBackspace()
+{
+    if (imeBuffer.isEmpty()) return;
+    imeBuffer.remove(imeBuffer.length() - 1);
+    imePage = 0;
+    markDirty();
+}
+
+void imeCommit(const String& text)
+{
+    if (text.isEmpty()) return;
+    if (cursor < static_cast<int>(msgs.size())) cursor = static_cast<int>(msgs.size());
+    inputInsert(text);
+    imeBuffer = "";
+    imePage   = 0;
+    markDirty();
+}
+
+void imeCommitFirstOrRaw()
+{
+    const int total = imeCandidateCount();
+    if (total > 0) {
+        const String ch = imeCandidateAt(imePage * kImePerPage);
+        if (!ch.isEmpty()) {
+            imeCommit(ch);
+            return;
+        }
+    }
+    // Unknown spelling: keep exactly what was typed instead of trapping it.
+    imeCommit(imeBuffer);
+}
+
+void imeSelect(int number)
+{
+    const int idx = imePage * kImePerPage + number;
+    if (idx < 0 || idx >= imeCandidateCount()) return;
+    const String ch = imeCandidateAt(idx);
+    if (!ch.isEmpty()) imeCommit(ch);
+}
+
+void imePageBy(int delta)
+{
+    const int total = imeCandidateCount();
+    if (total <= 0) return;
+    const int pages = (total + kImePerPage - 1) / kImePerPage;
+    imePage += delta;
+    if (imePage < 0) imePage = 0;
+    if (imePage >= pages) imePage = pages - 1;
+    markDirty();
+}
+
 
 // ---------------------------------------------------------------------------
 // network
@@ -673,7 +792,7 @@ void voiceAbort(const char* why)
 // audioInit() owns the ES8311 codec and I2S0 in full duplex (BCLK 41, WS 43,
 // DOUT 42, DIN 46).  A capture only reads interleaved stereo frames from the
 // already-running driver and keeps the left (microphone) slot.
-constexpr size_t   kVoiceSamples = 1920;   // 120 ms at 16 kHz per read/send
+constexpr size_t   kVoiceSamples = 960;    // 60 ms at 16 kHz per read/send
 constexpr uint32_t kVoiceRate    = 16000;
 constexpr uint32_t kVoiceMaxMs   = 20000;  // hard cap; ENT/Fn+V stops earlier
 
@@ -926,7 +1045,9 @@ bool voiceCapture(uint32_t maxMs, bool allowStop)
             const uint32_t elapsed = millis() - start;
             if (elapsed > 0) voiceMeasuredHz = totalSamples * 1000u / elapsed;
         }
-        if ((sent & 3) == 0) render();
+        // 60 ms chunks: repaint every 8th (~480 ms) to keep the SPI render off
+        // the mic DMA's back; a repaint every 4 chunks was too frequent.
+        if ((sent & 7) == 0) render();
         const uint32_t tRender1 = millis();
         M5Cardputer.update();
         const uint32_t tUpd1 = millis();
@@ -1290,6 +1411,28 @@ void handlePress(Point2D_t point)
 
     // Full-screen editor for the message being composed.
     if (screen == Screen::kEdit) {
+        // The full-screen composer shares the chat's pinyin state.
+        if (fn && c == ' ') {
+            imeChinese = !imeChinese;
+            imeBuffer  = "";
+            imePage    = 0;
+            statusText = imeChinese ? "ZH" : "EN";
+            markDirty();
+            return;
+        }
+        if (!imeBuffer.isEmpty()) {
+            if (c == '-' || c == '=') { imePageBy(c == '-' ? -1 : +1); return; }
+            if (c == KEY_ENTER || c == ' ') { imeCommitFirstOrRaw(); return; }
+            if (c == KEY_BACKSPACE) { imeBackspace(); return; }
+            if (c == '`') { imeBuffer = ""; imePage = 0; markDirty(); return; }
+            if (c >= '1' && c <= '5') { imeSelect(c - '1'); return; }
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { imeAppend(c); return; }
+            if (!fn) return;
+        }
+        if (imeChinese && !fn && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+            imeAppend(c);
+            return;
+        }
         if (c == '`') {
             screen = Screen::kChat;
             markDirty();
@@ -1323,6 +1466,30 @@ void handlePress(Point2D_t point)
 
     // Chat: the cursor selects a message (ENTER opens it full screen) or sits on
     // the input row (typing edits it, ENTER sends). Left/right move the caret.
+
+    // Chinese IME: while a syllable is composing it owns the printable keys.
+    if (fn && c == ' ') {
+        imeChinese = !imeChinese;
+        imeBuffer  = "";
+        imePage    = 0;
+        statusText = imeChinese ? "ZH" : "EN";
+        markDirty();
+        return;
+    }
+    if (!imeBuffer.isEmpty()) {
+        if (c == '-' || c == '=') { imePageBy(c == '-' ? -1 : +1); return; }
+        if (c == KEY_ENTER || c == ' ') { imeCommitFirstOrRaw(); return; }
+        if (c == KEY_BACKSPACE) { imeBackspace(); return; }
+        if (c == '`') { imeBuffer = ""; imePage = 0; markDirty(); return; }
+        if (c >= '1' && c <= '5') { imeSelect(c - '1'); return; }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { imeAppend(c); return; }
+        if (!fn) return;  // no cursor motion / punctuation while composing
+    }
+    if (imeChinese && !fn && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        imeAppend(c);
+        return;
+    }
+
     if (c == '`') {
         screen = Screen::kDeck;
         requestSessions();
@@ -1413,12 +1580,52 @@ void drawHeader()
             canvas.setTextColor(kText, kHead);
             canvas.drawString(tick, 104, 0);
             canvas.setTextFont(1);
+        } else {
+            // A static cue is enough to show the turn is still alive while no
+            // reasoning/text has arrived yet; no redraw timer needed.
+            canvas.setTextColor(kDim, kHead);
+            canvas.drawString("...", 104, 2);
         }
     }
     char battery[16];
     snprintf(battery, sizeof(battery), "%d%%", M5.Power.getBatteryLevel());
     canvas.setTextColor(kText, kHead);
     canvas.drawRightString(battery, lcd.width() - 3, 2);
+}
+
+void drawImeBar(int y)
+{
+    canvas.setFont(&lgfx::fonts::efontCN_12);
+    canvas.setTextColor(kAccent, kBg);
+    canvas.drawString(imeBuffer + ":", 3, y);
+    int x = 3 + canvas.textWidth(imeBuffer + ":") + 4;
+    const int total = imeCandidateCount();
+    const int first = imePage * kImePerPage;
+    for (int i = 0; i < kImePerPage; ++i) {
+        const int idx = first + i;
+        if (idx >= total || x > lcd.width() - 4) break;
+        const String ch = imeCandidateAt(idx);
+        canvas.setTextFont(1);
+        canvas.setTextColor(kDim, kBg);
+        const String num = String(i + 1);
+        canvas.drawString(num, x, y + 3);
+        x += canvas.textWidth(num) + 1;
+        canvas.setFont(&lgfx::fonts::efontCN_12);
+        canvas.setTextColor(kText, kBg);
+        canvas.drawString(ch, x, y);
+        x += canvas.textWidth(ch) + 6;
+    }
+    canvas.setTextFont(1);
+    if (total == 0) {
+        canvas.setTextColor(kWarn, kBg);
+        canvas.drawString("no match", x, y + 3);
+    } else if (x < lcd.width() - 40) {
+        const int pages = (total + kImePerPage - 1) / kImePerPage;
+        canvas.setTextColor(kDim, kBg);
+        char pos[16];
+        snprintf(pos, sizeof(pos), "%d/%d - =", imePage + 1, pages);
+        canvas.drawRightString(pos, lcd.width() - 3, y + 3);
+    }
 }
 
 void drawHints(const char* const* keys, const char* const* labels, int count)
@@ -1562,6 +1769,12 @@ void drawChat()
     if (!streamText.isEmpty()) {
         canvas.setTextColor(kDim, kBg);
         canvas.drawString("AI  " + truncateUtf8(streamText, 30), 3, 26 + kChatRows * rowH);
+    } else if (running) {
+        // The turn is running but no text/reasoning has arrived yet (tool call,
+        // model warm-up): show a live placeholder instead of a blank row.
+        canvas.setTextColor(kAccent, kBg);
+        const String hint = thinkingText.isEmpty() ? String("...") : truncateUtf8(thinkingText, 26);
+        canvas.drawString("AI  " + hint, 3, 26 + kChatRows * rowH);
     }
     canvas.setTextFont(1);
 
@@ -1582,11 +1795,18 @@ void drawChat()
     canvas.setTextColor(onInput ? kText : kDim, onInput ? kBar : kBg);
     canvas.drawString("> " + pre + input.substring(caret), 3, inputY);
     if (onInput && caretOn) canvas.drawFastVLine(caretX, inputY, 11, kAccent);
-    canvas.setTextFont(1);
 
-    static const char* const keys[]   = {"ENT", "FnENT", "FnV", "FnX", "FnN", "FnS", ";.", ",/", "esc"};
-    static const char* const labels[] = {"open/send", "edit", "voice", "stop", "new", "deck", "move", "caret", "back"};
-    drawHints(keys, labels, 9);
+    // IME mode badge in the input row's right margin.
+    canvas.setTextColor(imeChinese ? kAccent : kDim, onInput ? kBar : kBg);
+    canvas.drawRightString(imeChinese ? "ZH" : "EN", lcd.width() - 3, inputY);
+
+    if (!imeBuffer.isEmpty()) {
+        drawImeBar(117);
+    } else {
+        static const char* const keys[]   = {"ENT", "FnENT", "FnV", "FnX", "FnN", "FnS", "FnSPC", ";.", ",/", "esc"};
+        static const char* const labels[] = {"open/send", "edit", "voice", "stop", "new", "deck", "zh/en", "move", "caret", "back"};
+        drawHints(keys, labels, 10);
+    }
 }
 
 /// Full-screen reading view: no header, no footer, maximum content per screen.
@@ -1638,13 +1858,15 @@ void drawPreview()
 void drawEdit()
 {
     canvas.fillScreen(kBg);
+    const bool composing  = !imeBuffer.isEmpty();
+    const int  contentEnd = composing ? lcd.height() - 26 : lcd.height() - 14;
     std::vector<String> lines;
     canvas.setFont(&lgfx::fonts::efontCN_12);
     wrapInto(lines, input, "", lcd.width() - 6);
     canvas.setTextColor(kText, kBg);
     const int lineH = 12;
     int y = 2;
-    for (size_t i = 0; i < lines.size() && y < lcd.height() - 14; ++i) {
+    for (size_t i = 0; i < lines.size() && y < contentEnd; ++i) {
         canvas.drawString(lines[i], 3, y);
         y += lineH;
     }
@@ -1657,6 +1879,12 @@ void drawEdit()
     if (caretOn) canvas.drawFastVLine(caretX, 2 + caretLine * lineH, 11, kAccent);
 
     canvas.setTextFont(1);
+    canvas.setTextColor(imeChinese ? kAccent : kDim, kBg);
+    canvas.drawRightString(imeChinese ? "ZH" : "EN", lcd.width() - 3, lcd.height() - 10);
+    if (composing) {
+        drawImeBar(lcd.height() - 23);
+        return;
+    }
     canvas.setTextColor(kDim, kBg);
     canvas.drawFastHLine(0, lcd.height() - 12, lcd.width(), kDim);
     canvas.setTextColor(kOk, kBg);

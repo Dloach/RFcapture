@@ -348,6 +348,10 @@ bool Client::sendFrame(uint8_t opcode, const uint8_t* data, size_t length)
                             static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(mask)};
     for (int i = 0; i < 4; ++i) header[h++] = mb[i];
 
+    // NOTE: WiFiClient does not override availableForWrite() on this core
+    // (the base Client returns 0), so it cannot be used to gate sends.  The
+    // 60 ms audio chunks are small enough for lwIP's send buffer instead.
+
     if (socket_.write(header, h) != h) {
         drop("write header");
         return false;
