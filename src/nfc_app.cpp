@@ -737,11 +737,15 @@ void readerSetup()
     // Retry: after the boot-time power pulse the chip is not always ready on the
     // first attempt, and a single failed begin() used to leave the whole NFC
     // feature silently dead (no card reads, emulation unable to arm).
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        const bool wired = m5::unit::wiring::addSPI(units, unit, 10000000, 1);
-        nfcReady         = wired && units.begin();
-        Serial.printf("[read] addSPI=%d begin=%d (attempt %d)\n", static_cast<int>(wired),
-                      static_cast<int>(nfcReady), attempt + 1);
+    // addSPI() registers the unit with `units`; a second call is rejected
+    // ("already added"), so it must happen once and only units.begin() --
+    // which is safe to re-enter -- goes inside the retry loop.
+    const bool wired = m5::unit::wiring::addSPI(units, unit, 10000000, 1);
+    nfcReady         = false;
+    Serial.printf("[read] addSPI=%d\n", static_cast<int>(wired));
+    for (int attempt = 0; attempt < 4 && wired; ++attempt) {
+        nfcReady = units.begin();
+        Serial.printf("[read] begin=%d (attempt %d)\n", static_cast<int>(nfcReady), attempt + 1);
         if (nfcReady) break;
         delay(300);
     }
@@ -871,11 +875,14 @@ void emulatorSetup(uint8_t idx, uint32_t key)
     ucfg.mode      = NFC::A;
     unit.config(ucfg);
 
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        const bool wired = m5::unit::wiring::addSPI(units, unit, 10000000, 1);
-        nfcReady         = wired && units.begin();
-        Serial.printf("[emu] addSPI=%d begin=%d (attempt %d)\n", static_cast<int>(wired),
-                      static_cast<int>(nfcReady), attempt + 1);
+    // Same retry shape as readerSetup(): addSPI registers the unit once (a
+    // repeat call is rejected), only units.begin() is retried.
+    const bool wired = m5::unit::wiring::addSPI(units, unit, 10000000, 1);
+    nfcReady         = false;
+    Serial.printf("[emu] addSPI=%d\n", static_cast<int>(wired));
+    for (int attempt = 0; attempt < 4 && wired; ++attempt) {
+        nfcReady = units.begin();
+        Serial.printf("[emu] begin=%d (attempt %d)\n", static_cast<int>(nfcReady), attempt + 1);
         if (nfcReady) break;
         delay(300);
     }
