@@ -135,6 +135,15 @@ function collapse(text, limit) {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat
 }
 
+/**
+ * Per-message cap the device actually keeps: the firmware truncates every
+ * incoming message to this many characters (kMaxMsgChars in
+ * src/harness_app.cpp), so anything longer is bandwidth the 16 KiB frame
+ * limit turns into a discarded frame -- the oversized-snapshot reconnect
+ * loop.  Collapse here, before the frame is ever built.
+ */
+const kDeviceMsgChars = 700
+
 /** True for loopback, RFC1918, and link-local peers. */
 function isLanAddress(address) {
   if (typeof address !== 'string' || address.length === 0) return false
@@ -471,6 +480,11 @@ class CardputerClient {
       const messages = (Array.isArray(frame.records) ? frame.records : [])
         .map(messageOfRecord)
         .filter(Boolean)
+        // Collapse before the frame is serialised: the device truncates each
+        // message to kDeviceMsgChars anyway, and six raw transcripts can blow
+        // past the firmware's 16 KiB frame limit -- an oversized snapshot is
+        // then discarded and the re-requested one is just as big.
+        .map(m => ({ ...m, text: collapse(m.text, kDeviceMsgChars) }))
       this.send({
         type: 'snapshot',
         sessionId,
@@ -490,7 +504,9 @@ class CardputerClient {
           sessionId,
           seq: message.seq,
           role: message.role,
-          text: message.text,
+          // Same cap as the snapshot rows: the firmware keeps at most
+          // kDeviceMsgChars of a message, so send that much.
+          text: collapse(message.text, kDeviceMsgChars),
         })
         // The prompt has been committed: a live Agent now exists for this
         // Session, so refresh the cached card data on the next list.

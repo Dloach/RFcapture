@@ -14,8 +14,16 @@ constexpr uint32_t kConnectTimeoutMs   = 1500;
 constexpr uint32_t kHandshakeTimeoutMs = 1500;
 constexpr uint32_t kPingMs             = 20000;
 // Largest frame accepted from the Host.  The device asks for small pages, so a
-// normal frame is 1-6 KiB; anything above this is a protocol error.
+// normal frame is 1-6 KiB.  A frame above this is discarded (never delivered,
+// link kept) rather than treated as a protocol error, so one oversized
+// snapshot cannot trap the client in a reconnect loop.
 constexpr size_t   kRxLimit            = 16384;
+// Bound on the unconsumed span of rx_: parseFrames() drains every complete
+// frame, so the span is at most one maximum-size frame being assembled plus a
+// read chunk.  The old check in pump() compared the whole buffered stream
+// against kRxLimit, which dropped a legal 16 KiB frame (header pushed it over)
+// and misreported several coalesced small frames as "too large".
+constexpr size_t   kStreamLimit        = kRxLimit + 512;
 constexpr size_t   kHandshakeLimit     = 1024;
 
 // Index just past the "\r\n\r\n" that ends the HTTP response headers, or -1.
@@ -48,9 +56,11 @@ void Client::begin(const String& host, uint16_t port, const String& path, const 
     lastAttemptMs_   = 0;
     handshake_.clear();
     rx_.clear();
-    rxOff_ = 0;
+    rxOff_           = 0;
+    skipRemaining_   = 0;
+    discardFragment_ = false;
     fragments_.clear();
-    fragmentOpcode_ = 0;
+    fragmentOpcode_  = 0;
 }
 
 void Client::restart()
@@ -121,6 +131,16 @@ void Client::loop()
                 return;
             }
             pump();
+            // Dead-link detection: a bridge that died without a FIN (host
+            // sleep, power cut, cable pull) keeps socket_.connected() true and
+            // the writes "succeed" into lwIP's buffer for minutes.  Every ping
+            // is answered with a pong, so a healthy link refreshes lastRxMs_
+            // within one ping interval; three intervals with no traffic in
+            // either direction means the socket is gone.
+            if (state_ == State::kOpen && now - lastRxMs_ >= 3u * kPingMs) {
+                drop("rx timeout");
+                return;
+            }
             if (state_ == State::kOpen && now - lastPingMs_ >= kPingMs) {
                 lastPingMs_ = now;
                 sendFrame(0x9, nullptr, 0);
@@ -191,11 +211,24 @@ void Client::pump()
     while (socket_.available() > 0) {
         const int n = socket_.read(buffer, sizeof(buffer));
         if (n <= 0) break;
-        if (rx_.size() - rxOff_ + static_cast<size_t>(n) > kRxLimit) {
-            drop("frame too large");
-            return;
+        size_t off  = 0;
+        size_t keep = static_cast<size_t>(n);
+        if (skipRemaining_ > 0) {
+            // Inside an oversized frame: its payload goes straight to the
+            // floor, so a hostile or runaway frame costs no heap.  The bytes
+            // past its end belong to the next frame and are kept.
+            const uint64_t take = skipRemaining_ < keep ? skipRemaining_ : keep;
+            skipRemaining_ -= take;
+            off  += static_cast<size_t>(take);
+            keep -= static_cast<size_t>(take);
         }
-        rx_.insert(rx_.end(), buffer, buffer + n);
+        if (keep > 0) {
+            if (rx_.size() - rxOff_ + keep > kStreamLimit) {
+                drop("stream overflow");
+                return;
+            }
+            rx_.insert(rx_.end(), buffer + off, buffer + off + keep);
+        }
     }
     parseFrames();
 }
@@ -223,12 +256,51 @@ void Client::parseFrames()
             for (int i = 0; i < 8; ++i) length = (length << 8) | p[2 + i];
             header = 10;
         }
-        if (length > kRxLimit) {
-            drop("payload too large");
-            return;
-        }
         const size_t maskOffset = header;
         if (masked) header += 4;
+
+        // Consume this frame without delivering it: advance past what is
+        // buffered, and enter skip mode when only part of the payload has
+        // arrived.  (When the frame is incomplete, everything buffered is
+        // payload -- no later frame's bytes can exist yet.)
+        auto discardFrame = [&]() {
+            if (available <= header) {
+                // Not even the full header (mask bytes included) has arrived:
+                // skip what is left of header plus the whole payload.
+                skipRemaining_ = length + (header - available);
+                rxOff_         = rx_.size();
+                return;
+            }
+            const uint64_t have = available - header;
+            if (length <= have) {
+                rxOff_ += header + static_cast<size_t>(length);
+            } else {
+                skipRemaining_ = length - have;
+                rxOff_         = rx_.size();
+            }
+        };
+
+        if (length > kRxLimit) {
+            // Oversized but structurally valid: throw the frame away and keep
+            // the link.  The old behaviour dropped the socket, the reconnect
+            // re-requested the same snapshot, and the same oversized frame came
+            // back -- the session could never be opened, all the user saw was
+            // an endless RECONNECT.
+            discardFrame();
+            // A message this large is never delivered, and if it was itself a
+            // fragment the message it belonged to is doomed: swallow its
+            // remaining continuation frames until the FIN.
+            fragmentOpcode_  = 0;
+            fragments_.clear();
+            discardFragment_ = !fin;
+            continue;
+        }
+        if (discardFragment_ && opcode == 0x0) {
+            // Continuation of a message whose earlier fragment was discarded.
+            discardFrame();
+            if (fin) discardFragment_ = false;
+            continue;
+        }
         if (available < header + length) break;
 
         // A server must not mask, but tolerate one that does.
@@ -290,7 +362,12 @@ void Client::handleFrame(uint8_t opcode, const uint8_t* payload, size_t length, 
                 return;
             }
             if (fragments_.size() + length > kRxLimit) {
-                drop("fragments too large");
+                // The assembled message would exceed the frame limit: abandon
+                // the whole message but keep the link (same reasoning as the
+                // single-frame oversize path in parseFrames).
+                fragmentOpcode_  = 0;
+                fragments_.clear();
+                discardFragment_ = !fin;
                 return;
             }
             fragments_.insert(fragments_.end(), payload, payload + length);
@@ -316,6 +393,10 @@ void Client::handleFrame(uint8_t opcode, const uint8_t* payload, size_t length, 
             return;
 
         case 0xA:  // pong
+            // On an otherwise idle link the only traffic is our own
+            // ping/pong pair, so a pong is the liveness proof the rx
+            // watchdog in loop() judges by.
+            lastRxMs_ = millis();
             return;
 
         default:
@@ -379,13 +460,15 @@ void Client::drop(const char* why)
 {
     lastDrop_ = why;
     socket_.stop();
-    state_          = State::kDown;
-    fragmentOpcode_ = 0;
+    state_           = State::kDown;
+    fragmentOpcode_  = 0;
     fragments_.clear();
     rx_.clear();
-    rxOff_     = 0;
+    rxOff_           = 0;
+    skipRemaining_   = 0;
+    discardFragment_ = false;
     handshake_.clear();
-    lastAttemptMs_ = millis();
+    lastAttemptMs_   = millis();
 }
 
 }  // namespace harnessws

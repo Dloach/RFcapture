@@ -86,6 +86,15 @@ private:
 
     std::vector<uint8_t> rx_;
     size_t               rxOff_ = 0;
+    // Oversized-frame discard: instead of dropping the socket (which used to
+    // reconnect and re-request the same oversized snapshot forever), the
+    // payload of a too-large frame is thrown away byte by byte while the link
+    // stays up.
+    uint64_t             skipRemaining_  = 0;
+    // Set when the frame just discarded was itself a fragment: the rest of that
+    // doomed message's continuation frames must be consumed the same way
+    // until its FIN arrives.
+    bool                 discardFragment_ = false;
 
     std::vector<uint8_t> fragments_;
     uint8_t              fragmentOpcode_ = 0;

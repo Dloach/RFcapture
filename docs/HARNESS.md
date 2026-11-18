@@ -72,6 +72,14 @@ needed. The bundle row is `include:cardputer-ws`.
   state machine (`kDown` → `kHandshake` → `kOpen`); while connected it only
   drains bytes that already arrived. The single blocking call is the TCP connect
   on a retry (≤1.5 s, only while offline).
+- **Link resilience.** Frames above 16 KiB are discarded (link kept) instead of
+  dropping the socket — an oversized snapshot used to reconnect and re-request
+  the same frame forever, making that session impossible to open; the plugin now
+  collapses every message to the device's 700-char cap (`kDeviceMsgChars`)
+  before serialising, so snapshots stay ~4-5 KiB. A pong refreshes the liveness
+  clock, and 60 s with zero traffic in either direction (`rx timeout`) drops a
+  bridge that died without a FIN (host sleep / power cut / cable pull) instead
+  of showing "SENT" for minutes while nothing is delivered.
 - **Memory.** The old 64 KiB static WAV buffer is gone — voice is captured in
   240 ms slices and streamed as base64 (`stt.chunk`), so the Host assembles the
   WAV. Static RAM is 54.2 % (177,580 B of 327,680) with the canvas on the heap.
