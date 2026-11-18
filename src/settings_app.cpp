@@ -2,7 +2,9 @@
 
 #include <ArduinoOTA.h>
 #include <M5Cardputer.h>
+#include <Preferences.h>
 #include <WiFi.h>
+#include <esp_system.h>
 
 #include <cstring>
 #include <vector>
@@ -56,15 +58,41 @@ int savedTop    = 0;
 char statusMsg[48] = {0};
 char testResult[32] = {0};
 
-// OTA uses ArduinoOTA over the same station link.  The password must match the
-// --auth flag in the cardputer-ota PlatformIO environment.
+// OTA uses ArduinoOTA over the same station link.  The password is
+// per-device: generated from the hardware RNG on first use, stored in NVS
+// ("ota"/"pass") and shown on the OTA page -- never compiled into the
+// firmware.  It must match the --auth flag used by the uploader.
 constexpr char kOtaHostname[] = "cardputer";
-constexpr char kOtaPassword[] = "cardputer-ota";
-bool otaStarted  = false;
+constexpr size_t kOtaPassLen = 10;
+char otaPass[kOtaPassLen + 1] = {0};
+bool otaStarted     = false;
 volatile bool otaUploading = false;
 volatile int otaPercent    = 0;
-bool otaFailed   = false;
+bool otaFailed     = false;
 char otaStatus[40] = "IDLE";
+
+void loadOtaPass()
+{
+    if (otaPass[0]) return;
+    Preferences p;
+    if (p.begin("ota", true)) {
+        p.getString("pass", otaPass, sizeof(otaPass));
+        p.end();
+    }
+    if (otaPass[0]) return;
+    // First use on this device: draw a fresh value from the hardware RNG.
+    // The alphabet leaves out the visually ambiguous 0/O/1/l/I.
+    static const char kAlpha[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    for (size_t i = 0; i < kOtaPassLen; ++i) {
+        otaPass[i] = kAlpha[esp_random() % (sizeof(kAlpha) - 1)];
+    }
+    Preferences w;
+    if (w.begin("ota", false)) {
+        w.putString("pass", otaPass);
+        w.end();
+    }
+    Serial.printf("[ota] generated new device password\n");
+}
 
 enum : uint32_t {
     kUp     = 1u << 0,
@@ -406,8 +434,9 @@ void otaSuccessChime()
 void startOta()
 {
     if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+    loadOtaPass();
     ArduinoOTA.setHostname(kOtaHostname);
-    ArduinoOTA.setPassword(kOtaPassword);
+    ArduinoOTA.setPassword(otaPass);
     ArduinoOTA.setPort(3232);
     ArduinoOTA.onStart([]() {
         otaUploading = true;
@@ -474,7 +503,11 @@ void drawOta()
 
     lcd.setTextColor(kDim, kBg);
     lcd.drawString("HOST cardputer.local", 6, 84);
-    lcd.drawString("PORT 3232   AUTH ON", 6, 94);
+    // The pass is displayed so the operator can copy it into --auth on the
+    // PC side; it lives only in this device's NVS, not in the repository.
+    char passLine[40];
+    snprintf(passLine, sizeof(passLine), "PORT 3232  PASS %s", otaPass);
+    lcd.drawString(passLine, 6, 94);
     lcd.drawString("Keep this page open while flashing.", 6, 104);
     static const Hint h[] = {{"esc", "back"}};
     hints(h, 1);

@@ -26,8 +26,7 @@ pio run -e cardputer-adv -t upload --upload-port COM13
    - `WIFI CONNECTED`
    - 本机 IP（例如 `192.168.1.42`）
    - `HOST cardputer.local`
-   - `PORT 3232`
-   - `AUTH ON`
+   - `PORT 3232  PASS xxxxxxxxxx`
 4. **保持这个页面打开**；离开页面会 `ArduinoOTA.end()`，上传会中断。
 
 ## 电脑端
@@ -49,21 +48,18 @@ pio run -e cardputer-ota -t upload --upload-port cardputer.local
 ```ini
 upload_protocol = espota
 upload_port = cardputer.local
-upload_flags = --auth=cardputer-ota
+upload_flags = --auth=READ_FROM_DEVICE_SCREEN   ; 换成设备屏幕显示的 PASS
 ```
 
 ## 认证密码
 
-当前默认：
+**每台设备一个、不进源码仓库**：首次打开 OTA 页面时由硬件随机数生成
+10 位口令，存 NVS（`ota`/`pass`），直接显示在 OTA 页的 `PASS ...` 行。
+上传前把屏幕上的值填进 `platformio.ini` 的 `--auth=...`（或命令行
+`--upload-flags "--auth=屏幕值"`）。
 
-```text
-cardputer-ota
-```
-
-要改密码，同时修改两处：
-
-- `src/settings_app.cpp` 的 `kOtaPassword`
-- `platformio.ini` 的 `--auth=...`
+忘记口令时重进 OTA 页即可看到（它一直在 NVS 里）；要换新口令，
+进 SETTINGS 删 NVS `ota` 命名空间或直接整块擦除前先备份（谨慎操作）。
 
 ## 页面状态
 
@@ -77,7 +73,7 @@ cardputer-ota
 
 - **`pio` 找不到 cardputer.local**：用屏幕 IP；Windows mDNS 不稳定。
 - **连接被拒绝**：确认设备仍停在 OTA UPDATE 页，且 IP 没变。
-- **auth failed**：密码不一致，检查上面两处。
+- **auth failed**：密码不一致——用设备 OTA 页 `PASS ...` 行显示的值。
 - **上传中断**：不要离开页面、不要断电；重新进入 OTA 页再试。
 - **新固件起不来**：G0 + USB 重新烧 `cardputer-adv` 即可，OTA 不会覆盖 NVS/SPIFFS。
 - **OTA 不是 RF/NFC 模式**：OTA 页面属于 SETTINGS，射频/读卡功能此时未初始化。

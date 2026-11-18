@@ -60,7 +60,10 @@ M5Stack Cardputer ADV 上，用 **CAP.CC1101**（CC1101 + ST25R3916）、板载�
   - 保存最多 5 个网络，启动时自动连上次成功的网络；
   - `TEST CONNECTION` 用 `example.com:80` 验证 DNS/外网 TCP。
 - **SETTINGS → OTA UPDATE**
-  - 基于 ArduinoOTA 的无线烧录，`cardputer.local:3232`，密码 `cardputer-ota`；
+  - 基于 ArduinoOTA 的无线烧录，`cardputer.local:3232`；
+  - 密码**每台设备独立**：首次打开该页时随机生成并显示在屏幕上（NVS `ota`），
+    电脑端 `pio run -e cardputer-ota -t upload` 前把屏幕值填进
+    `platformio.ini` 的 `--auth=...`；
   - 第一次仍需 USB，之后 `pio run -e cardputer-ota -t upload`；
   - 详细步骤见 [docs/OTA.md](docs/OTA.md)。
 - **SETTINGS → DISPLAY / POWER**
