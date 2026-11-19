@@ -2000,14 +2000,21 @@ void drawApproval()
 void drawOta()
 {
     if (otaUploading) {
-        flashui::draw(canvas, otaPercent, "DO NOT EXIT");
+        flashui::draw(canvas, otaPercent, "RECEIVE + WRITE", "OTA FLASH");
         return;
     }
     if (otaFailed) {
         flashui::drawError(canvas, otaStatus);
         return;
     }
-    flashui::draw(canvas, otaPercent, "WAITING FOR UPLOAD");
+    if (otaPercent >= 100) {
+        // onEnd has fired; the chip reboots within a second.  Keep the full
+        // progress page up instead of flashing back to the normal OTA page
+        // for that final moment.
+        flashui::draw(canvas, 100, "DONE - REBOOTING", "OTA FLASH");
+        return;
+    }
+    flashui::draw(canvas, otaPercent, "WAITING FOR UPLOAD", "OTA FLASH");
 }
 
 /// New-session control chooser: the boundary is picked before the Session is

@@ -28,9 +28,11 @@ void drawCenter(GFX& g, const char* text, int y)
 }
 
 /// The one screen shown for the whole upload.  `percent` is 0..100 and comes
-/// from ArduinoOTA.onProgress; `note` is a short line under the title.
+/// from ArduinoOTA.onProgress; `note` is a short line under the title;
+/// `title` distinguishes the wired (ROM bootloader) and wireless (OTA)
+/// flashing screens.
 template <typename GFX>
-void draw(GFX& g, int percent, const char* note)
+void draw(GFX& g, int percent, const char* note, const char* title = "FLASHING")
 {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
@@ -40,7 +42,7 @@ void draw(GFX& g, int percent, const char* note)
     g.setTextFont(1);
     g.setTextSize(2);
     g.setTextColor(kText, kBg);
-    drawCenter(g, "FLASHING", 10);
+    drawCenter(g, title, 10);
 
     g.setTextSize(1);
     g.setTextColor(kDim, kBg);

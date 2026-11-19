@@ -61,6 +61,17 @@ upload_flags = --auth=READ_FROM_DEVICE_SCREEN   ; 换成设备屏幕显示的 PA
 忘记口令时重进 OTA 页即可看到（它一直在 NVS 里）；要换新口令，
 进 SETTINGS 删 NVS `ota` 命名空间或直接整块擦除前先备份（谨慎操作）。
 
+## 烧录时的屏幕（USB 与 OTA 一致）
+
+- **USB 烧录**（`pio ... -t upload` / `tools/flash.ps1`）：主机的
+  1200 bps touch 一到，固件立即挂起当前功能、全屏显示
+  **USB FLASH / PC IS UPLOADING** 与空进度条，然后才复位进 ROM
+  下载模式；烧录期间固件不运行，**这帧画面保持到烧录完成**。
+  期间所有按键无效——设备只认主机。
+- **OTA 烧录**：`UPLOADING` 一起即独占设备（WS / 麦克风 / 聊天 / 按键
+  全部停止），进度条覆盖**接收+写入**全过程，完成后停在
+  `DONE - REBOOTING`（100%）再重启。
+
 ## 页面状态
 
 - `WAITING FOR WIFI`：WiFi 还没连上；

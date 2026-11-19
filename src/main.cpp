@@ -19,6 +19,7 @@
 #include "backup_app.h"
 #include "files_app.h"
 #include "drum_app.h"
+#include "flash_mode.h"
 #include "harness_app.h"
 #include "ir_config.h"
 #if ENABLE_IR_TOOLS
@@ -184,6 +185,11 @@ void setup()
     // CDC is no longer started by the core before setup(): USB DISK has to
     // register its MSC interface first so the descriptor includes it.
     USB.begin();
+    // Take over the 1200 bps "touch" reset: with this installed the device
+    // shows the dedicated flashing page (and suspends the running app) the
+    // instant an upload starts over USB, instead of freezing on whatever
+    // screen it happened to be on.  See flash_mode.h.
+    flashmode::begin(usbSerial);
     uiprefs::begin();
     uiprefs::applyBrightness();
 

@@ -121,7 +121,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\flash.ps1 -Port COM13
 
 > **USB mode 0**：USB 是 TinyUSB 复合设备（CDC + HID，USB DISK 模式另有 MSC）。
 > CDC 现在由 app 注册、main 手动 `USB.begin()` 启动；运行口/VID:PID 会变，烧录使用
-> 1200bps touch。如果 Windows 找不到新口，按住键盘左上角 **G0** 再插 USB 进 ROM
+> 1200bps touch。**烧录 touch 一到，设备立即全屏显示 USB FLASH 烧录页并挂起一切操作**
+> （见 [docs/OTA.md](docs/OTA.md)）。如果 Windows 找不到新口，按住键盘左上角 **G0** 再插 USB 进 ROM
 > 下载模式，用 `esptool` 直接写。具体 COM 号以 `pio device list` 为准。
 
 macOS / Linux：

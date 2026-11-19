@@ -66,6 +66,7 @@ constexpr char kOtaHostname[] = "cardputer";
 constexpr size_t kOtaPassLen = 10;
 char otaPass[kOtaPassLen + 1] = {0};
 bool otaStarted     = false;
+bool otaDone        = false;
 volatile bool otaUploading = false;
 volatile int otaPercent    = 0;
 bool otaFailed     = false;
@@ -440,6 +441,7 @@ void startOta()
     ArduinoOTA.setPort(3232);
     ArduinoOTA.onStart([]() {
         otaUploading = true;
+        otaDone      = false;
         otaFailed    = false;
         otaPercent   = 0;
         snprintf(otaStatus, sizeof(otaStatus), "UPLOADING");
@@ -451,6 +453,7 @@ void startOta()
     });
     ArduinoOTA.onEnd([]() {
         otaUploading = false;
+        otaDone      = true;
         otaPercent   = 100;
         snprintf(otaStatus, sizeof(otaStatus), "DONE - REBOOTING");
         dirty = true;
@@ -476,11 +479,18 @@ void drawOta()
     // text and the whole-transfer progress bar.  The settings header, WiFi
     // details and hints are not drawn at all.
     if (otaUploading) {
-        flashui::draw(lcd, otaPercent, "DO NOT EXIT");
+        flashui::draw(lcd, otaPercent, "RECEIVE + WRITE", "OTA FLASH");
         return;
     }
     if (otaFailed) {
         flashui::drawError(lcd, otaStatus);
+        return;
+    }
+    if (otaDone) {
+        // onEnd has fired; the chip reboots within a second.  Keep the full
+        // progress page up instead of flashing back to the settings OTA page
+        // for that final moment.
+        flashui::draw(lcd, 100, "DONE - REBOOTING", "OTA FLASH");
         return;
     }
 
@@ -517,6 +527,7 @@ void enterOta()
 {
     otaPercent   = 0;
     otaUploading = false;
+    otaDone      = false;
     otaFailed    = false;
     snprintf(otaStatus, sizeof(otaStatus), "WAITING FOR WIFI");
     scr   = Scr::kOta;
