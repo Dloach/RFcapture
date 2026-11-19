@@ -163,6 +163,16 @@ static const int kScanCount = static_cast<int>(sizeof(kScanPoints) / sizeof(kSca
 #define RF_RX_SELFTEST 0
 #endif
 
+// RF LAB send-path bring-up aid (env:rflab-selftest).  ~4 s after boot the
+// app replays the generator page's sendSignal() and the editor page's tuned
+// send sequence with a generated EV1527 frame, logging every step over USB
+// CDC.  Makes "the editor's S key does nothing" observable from a serial
+// log with no key press: a crash leaves the log at the last completed step,
+// a completed run exonerates the radio path.  Not for shipping.
+#ifndef RFLAB_TX_SELFTEST
+#define RFLAB_TX_SELFTEST 0
+#endif
+
 // Serial diagnostics and the on-screen "is the UI still alive" blink that were
 // added while chasing the keyboard freeze (docs/DEV-STATE.md section 3).  Left
 // on by default so nothing about current behaviour changes silently; building

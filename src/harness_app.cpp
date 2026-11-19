@@ -2329,6 +2329,27 @@ void loop()
         }
     }
 
+#if HARNESS_BOOT_SELFTEST
+    // Bring-up aid (env:harness-selftest): once the deck has rows, open the
+    // first session automatically so the snapshot path -- the oversized-frame
+    // burst that used to drop the link in a reconnect loop -- can be verified
+    // from a serial log with no key press.  One shot.
+    {
+        static bool opened = false;
+        if (!opened && screen == Screen::kDeck && !sessions.empty() && millis() > 30000) {
+            opened = true;
+            usbLogf("[hst] auto-open '%s'", sessions[deckSel].id.c_str());
+            openSelected();
+        }
+        static bool reported = false;
+        if (!reported && millis() > 60000) {
+            reported = true;
+            usbLogf("[hst] 60s: rows=%d wsOpen=%d", static_cast<int>(sessions.size()),
+                    ws.open() ? 1 : 0);
+        }
+    }
+#endif
+
     linkService();
     ws.loop();
 

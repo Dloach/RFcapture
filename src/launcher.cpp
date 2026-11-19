@@ -319,6 +319,11 @@ App currentApp()
     // HARNESS app so the host plugin can be verified without key presses.
     return kAppHarness;
 #endif
+#if RFLAB_TX_SELFTEST
+    // Bring-up build only (env:rflab-selftest): every reset lands in RF LAB
+    // so the send-path selftest in rflabapp::loop() can run unattended.
+    return kAppRfLab;
+#endif
 #if IR_BOOT_SELFTEST
     // Bring-up build only (env:ir-selftest): every software reset lands in IR
     // TOOLS so the feature can be exercised from a plain serial log, with no

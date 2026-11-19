@@ -18,6 +18,7 @@
 #include "saved_store.h"
 #include "sd_mount.h"
 #include "ui_hint.h"
+#include "usb_log.h"
 
 namespace rflabapp {
 namespace {
@@ -397,18 +398,24 @@ void drawGen()
     hints(h, 3);
 }
 
-void sendSignal(const rfsub::Signal& sig, int repeats)
+bool sendSignal(const rfsub::Signal& sig, int repeats)
 {
-    if (sig.count < 8) return;
+    if (sig.count < 8) return false;
     rf_.setBand(sig.band);
     rx_.suspend();
     // Same sequence as App::transmit(): setBand()/tuneTo() both leave the
     // CC1101 in RX, so without enterTx() (async-TX PKTCTRL0 + OOK PATABLE +
     // STX strobe) nothing goes on air while the RMT drives GDO0 against the
     // chip's own output driver.
+#if RFLAB_TX_SELFTEST
+    usbLogf("[txst] gen-path enterTx n=%u r=%d", static_cast<unsigned>(sig.count), repeats);
+#endif
     rf_.enterTx();
     delay(3);
-    tx_.send(sig.pulses, sig.count, repeats, 0);
+    const bool ok = tx_.send(sig.pulses, sig.count, repeats, 0);
+#if RFLAB_TX_SELFTEST
+    usbLogf("[txst] gen-path ok=%d", ok ? 1 : 0);
+#endif
     // The PA stage can leave the chip in an odd state; re-enter RX and
     // re-apply the lab band before listening again, exactly the way
     // transmit() recovers.
@@ -417,6 +424,7 @@ void sendSignal(const rfsub::Signal& sig, int repeats)
     rf_.setBand(band);
     rf_.enterRx();
     rx_.resume();
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -731,8 +739,7 @@ void handleGen(uint32_t p)
     if (p & kSend) {
         rfsub::Signal sig;
         if (makeGenerated(sig)) {
-            sendSignal(sig, 5);
-            snprintf(note, sizeof(note), "SENT");
+            snprintf(note, sizeof(note), sendSignal(sig, 5) ? "SENT" : "TX FAILED");
         }
         dirty = true;
     }
@@ -859,13 +866,15 @@ void handleEdit(uint32_t p)
             // air, same as sendSignal() and App::transmit().
             rf_.enterTx();
             delay(3);
-            tx_.send(s.pulses, s.count, editRepeat, 0);
+            const bool ok = tx_.send(s.pulses, s.count, editRepeat, 0);
             rf_.enterRx();
             delay(2);
             rx_.resume();
             rf_.setBand(band);
             rf_.enterRx();
-            snprintf(note, sizeof(note), "SENT x%d", editRepeat);
+            // The return value used to be ignored, so a failed send read as
+            // "SENT x5" on screen; report it like App::transmit() does.
+            snprintf(note, sizeof(note), ok ? "SENT x%d" : "TX FAILED", editRepeat);
         }
         dirty = true;
     }
@@ -901,6 +910,44 @@ void loop()
     const uint32_t actions = actionsNow();
     const uint32_t p = actions & ~prevActions;
     prevActions = actions;
+
+#if RFLAB_TX_SELFTEST
+    // Bring-up aid (env:rflab-selftest): ~4 s after boot, replay both RF LAB
+    // send paths with a generated EV1527 frame -- the generator page's
+    // sendSignal() and the editor page's tuned sequence -- reporting every
+    // step over USB CDC.  A crash leaves the log at the last completed step;
+    // a completed run exonerates the radio path and points any "the editor's
+    // S key does nothing" report at the key/UI layer instead.
+    {
+        static bool done = false;
+        if (!done && millis() > 4000) {
+            done = true;
+            usbLogf("[txst] === RF LAB send selftest ===");
+            rfsub::Signal sig;
+            if (!rfsub::buildEv1527(0x123456, 24, 350, sig)) {
+                usbLogf("[txst] build failed");
+            } else {
+                sig.band = RfBand::k433;
+                sendSignal(sig, 3);
+
+                usbLogf("[txst] editor-path start");
+                rf_.setBand(sig.band);
+                rf_.tuneTo(sig.band, rfsub::bandHz(sig.band));
+                rx_.suspend();
+                rf_.enterTx();
+                delay(3);
+                const bool ok = tx_.send(sig.pulses, sig.count, 5, 0);
+                rf_.enterRx();
+                delay(2);
+                rx_.resume();
+                rf_.setBand(band);
+                rf_.enterRx();
+                usbLogf("[txst] editor-path ok=%d", ok ? 1 : 0);
+            }
+            usbLogf("[txst] === selftest complete ===");
+        }
+    }
+#endif
 
     if (screen == Screen::kSpectrum && specRunning && millis() - lastSweepMs > 180) {
         lastSweepMs = millis();
