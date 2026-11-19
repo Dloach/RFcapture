@@ -912,15 +912,17 @@ void loop()
     prevActions = actions;
 
 #if RFLAB_TX_SELFTEST
-    // Bring-up aid (env:rflab-selftest): ~4 s after boot, replay both RF LAB
+    // Bring-up aid (env:rflab-selftest): ~15 s after boot, replay both RF LAB
     // send paths with a generated EV1527 frame -- the generator page's
     // sendSignal() and the editor page's tuned sequence -- reporting every
-    // step over USB CDC.  A crash leaves the log at the last completed step;
-    // a completed run exonerates the radio path and points any "the editor's
-    // S key does nothing" report at the key/UI layer instead.
+    // step over USB CDC.  The 15 s give the USB CDC port time to re-enumerate
+    // after the post-flash reset so a serial capture can watch the whole run.
+    // A crash leaves the log at the last completed step; a completed run
+    // exonerates the radio path and points any "the editor's S key does
+    // nothing" report at the key/UI layer instead.
     {
         static bool done = false;
-        if (!done && millis() > 4000) {
+        if (!done && millis() > 15000) {
             done = true;
             usbLogf("[txst] === RF LAB send selftest ===");
             rfsub::Signal sig;
