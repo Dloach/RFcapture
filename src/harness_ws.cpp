@@ -137,12 +137,26 @@ void Client::loop()
             // is answered with a pong, so a healthy link refreshes lastRxMs_
             // within one ping interval; three intervals with no traffic in
             // either direction means the socket is gone.
-            if (state_ == State::kOpen && now - lastRxMs_ >= 3u * kPingMs) {
-                drop("rx timeout");
+            //
+            // The clock is read HERE, not from the `now` captured at loop()
+            // entry: pump() may have delivered a frame and refreshed
+            // lastRxMs_ milliseconds after that snapshot, and the unsigned
+            // subtraction below would wrap to ~2^32 for that 1-2 ms skew --
+            // which dropped a healthy link on the very same tick the sessions
+            // list arrived (seen live as "now=26388 last=26390").  The
+            // timestamps ride along in the drop reason so the next such
+            // dispute is settled by one glance at the log.
+            const uint32_t nowOpen = millis();
+            if (state_ == State::kOpen && nowOpen - lastRxMs_ >= 3u * kPingMs) {
+                static char why[64];
+                snprintf(why, sizeof(why), "rx timeout now=%lu last=%lu",
+                         static_cast<unsigned long>(nowOpen),
+                         static_cast<unsigned long>(lastRxMs_));
+                drop(why);
                 return;
             }
-            if (state_ == State::kOpen && now - lastPingMs_ >= kPingMs) {
-                lastPingMs_ = now;
+            if (state_ == State::kOpen && nowOpen - lastPingMs_ >= kPingMs) {
+                lastPingMs_ = nowOpen;
                 sendFrame(0x9, nullptr, 0);
             }
             return;
@@ -229,6 +243,16 @@ void Client::pump()
             }
             rx_.insert(rx_.end(), buffer + off, buffer + off + keep);
         }
+        // Parse after EVERY read, not once after the whole socket drained.
+        // A burst larger than kStreamLimit (the old plugin pushes uncollapsed
+        // snapshots of 30 KiB+) arrives faster than a deferred parse could
+        // consume it: the span cap above fired mid-burst, the link dropped,
+        // the reconnect re-requested the session, and the same burst came
+        // back -- an endless offline/online/offline cycle.  Parsing here lets
+        // parseFrames() see the oversized header early and enter skip mode,
+        // after which the bytes are discarded right at the read.
+        if (keep > 0 || skipRemaining_ == 0) parseFrames();
+        if (state_ != State::kOpen) return;
     }
     parseFrames();
 }
